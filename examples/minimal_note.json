@@ -1,0 +1,39 @@
+{
+  "name": "minimal-note",
+  "title": "最小構成のサンプル頁",
+  "components": ["overview", "summary", "walkthrough", "examples", "progress", "visual", "decision", "evidence", "glossary", "details"],
+  "reasons": ["project_novice_default"],
+  "publish": "always",
+  "content": {
+    "overview": "この頁は定義JSONの最小構成を示すサンプルです。地の文を中心に、小さな図を1つだけ使って10部品を満たしています。",
+    "summary": "Goal：定義JSONの最小形を1枚で示す\nNow：この頁がその見本",
+    "walkthrough": "手順1：定義JSONを書く\n手順2：render_page.pyに渡す\n手順3：検品の結果を読む",
+    "examples": "例：`python .claude/scripts/render_page.py examples/minimal_note.json`",
+    "progress": "済み：このサンプルの作成\n次：README から辿れることの確認",
+    "sections": [
+      {"component": "visual", "num": "壱", "label": "組み立ての流れ",
+       "content": [{
+         "text": "図の読み方＝定義JSONを頁を組む道具に渡すと、1枚のHTMLと検品の結果が出ます。",
+         "diagram": {"num": "図1", "source": "このサンプル", "caption": "定義JSONから頁まで",
+           "nodes": [
+             {"id": "spec", "title": "定義JSON", "text": "この頁の中身"},
+             {"id": "tool", "title": "render_page.py", "text": "頁を組む道具"},
+             {"id": "page", "title": "HTML", "text": "検品済みの頁"}
+           ],
+           "edges": [
+             {"from": "spec", "to": "tool", "label": "渡す"},
+             {"from": "tool", "to": "page", "label": "組む"}
+           ]}
+       }]}
+    ],
+    "decision": {
+      "options": ["案A：例を1枚だけにする", "案B：例を2枚にして最小構成と部品つきを両方見せる"],
+      "judgments": ["これは私の判定：案Bを採用（このサンプル自体がその2枚目）"]
+    },
+    "evidence": "実測：render_page.pyはcomponentsに10部品が無いと警告を出す｜render_page.pyのdocstringとmain()の実装",
+    "glossary": "定義JSON：頁の中身と使う部品を書いたJSONファイル。頁を組む道具に渡す\n検品：組んだ頁が決まり（用語の説明・部品の目印・根拠の出所など）を守っているかを機械で確かめること",
+    "provenance": {"source": "examples/minimal_note.json", "owner": "local"},
+    "details": "note：これは補足の一言\ngood：うまくいっている点\nbad：まだ足りない点",
+    "rail": [{"heading": "この頁の用語", "glossary": true}]
+  }
+}

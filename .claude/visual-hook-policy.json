@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "explain_mode": "always",
+  "scope": "project",
+  "publish": "always",
+  "default_audience": "project_novice",
+  "default_depth": "deep",
+  "default_components": [
+    "overview",
+    "walkthrough",
+    "examples",
+    "evidence",
+    "glossary",
+    "details"
+  ],
+  "min_chars": 700,
+  "min_blocks": 8,
+  "state_ttl_seconds": 86400,
+  "max_artifact_bytes": 4194304,
+  "max_transcript_bytes": 2097152,
+  "visual_smoke_timeout_seconds": 12,
+  "local_artifact_root": "%TEMP%/explain-page",
+  "readability": "shadow"
+}

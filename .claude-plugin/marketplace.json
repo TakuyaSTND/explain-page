@@ -1,0 +1,16 @@
+{
+  "name": "explain-page",
+  "owner": {
+    "name": "TakuyaSTND"
+  },
+  "metadata": {
+    "description": "explain-page 本体のマーケットプレイス（プラグイン1本のみ）。"
+  },
+  "plugins": [
+    {
+      "name": "explain-page",
+      "source": "./plugins/explain-page",
+      "description": "人に見せる頁（説明・報告・判断のHTML）を正規レンダラーで組んで検品まで通すフック一式。エージェントが書いた頁を、用語ホバー・図・根拠つきで検品する。"
+    }
+  ]
+}

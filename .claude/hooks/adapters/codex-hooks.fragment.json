@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 {{PYTHON}} '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --project-root '{{PROJECT_ROOT}}'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|apply_patch|Artifact|open_preview",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 {{PYTHON}} '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --project-root '{{PROJECT_ROOT}}'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 {{PYTHON}} '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --project-root '{{PROJECT_ROOT}}'",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 {{PYTHON}} '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --project-root '{{PROJECT_ROOT}}'",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

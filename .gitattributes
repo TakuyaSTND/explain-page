@@ -1,0 +1,5 @@
+# 取り出したファイルの改行を、どの OS でも LF にそろえる（2026-09-25）。
+# 実測＝GitHub の Windows の実行環境は既定で CRLF に変えて取り出すので、道具が組む LF の
+# ファイルと食い違い、プラグインの一致の検査（build_plugin.py --check）が落ちた。
+* text=auto eol=lf
+*.png binary

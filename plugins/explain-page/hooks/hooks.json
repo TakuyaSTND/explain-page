@@ -1,0 +1,66 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/understanding-composer.py\" --runtime claude --plugin --project-root \"${CLAUDE_PROJECT_DIR}\"",
+            "timeout": 15,
+            "statusMessage": "初心者向けの説明構成を準備する"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|Artifact|open_preview",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/understanding-composer.py\" --runtime claude --plugin --project-root \"${CLAUDE_PROJECT_DIR}\"",
+            "timeout": 15,
+            "statusMessage": "local HTMLの検品証を記録する"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/understanding-composer.py\" --runtime claude --plugin --project-root \"${CLAUDE_PROJECT_DIR}\"",
+            "timeout": 15,
+            "statusMessage": "subagent結果を親向けに集約する"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/understanding-composer.py\" --runtime claude --plugin --project-root \"${CLAUDE_PROJECT_DIR}\"",
+            "timeout": 15,
+            "statusMessage": "説明componentの不足を確認する"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit|overloaded|authentication_failed|oauth_org_not_allowed|billing_error|invalid_request|model_not_found|server_error|max_output_tokens|unknown",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-python.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/understanding-composer.py\" --runtime claude --plugin --project-root \"${CLAUDE_PROJECT_DIR}\"",
+            "timeout": 15,
+            "statusMessage": "APIエラーの診断を表示する"
+          }
+        ]
+      }
+    ]
+  }
+}

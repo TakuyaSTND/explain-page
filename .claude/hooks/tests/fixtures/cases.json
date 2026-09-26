@@ -1,0 +1,74 @@
+[
+  {
+    "id": 1,
+    "name": "short-familiar",
+    "message": "git statusの結果を説明して",
+    "include": ["overview", "walkthrough"],
+    "exclude": ["visual", "decision"]
+  },
+  {
+    "id": 2,
+    "name": "short-project-concept",
+    "message": "このProjectのgoalLadderって何？",
+    "include": ["walkthrough", "examples", "glossary"],
+    "exclude": ["decision"]
+  },
+  {
+    "id": 3,
+    "name": "code-diff",
+    "message": "このcode diffの意味と影響を初心者向けに説明して",
+    "include": ["walkthrough", "evidence", "details"],
+    "exclude": ["decision"]
+  },
+  {
+    "id": 4,
+    "name": "long-report",
+    "message": "長い調査結果を説明して",
+    "response_repeat": 150,
+    "include": ["summary", "walkthrough", "details"],
+    "exclude": ["decision"]
+  },
+  {
+    "id": 5,
+    "name": "visual-no-decision",
+    "message": "6案を図で比較する記録用。人の判断は不要",
+    "include": ["visual", "walkthrough"],
+    "exclude": ["decision"]
+  },
+  {
+    "id": 6,
+    "name": "visual-decision",
+    "message": "3案を図で比較して最後に採用案を選びたい",
+    "include": ["visual", "decision", "evidence"],
+    "exclude": []
+  },
+  {
+    "id": 7,
+    "name": "multi-agent-progress-decision",
+    "message": "3つのsubagentの進捗をまとめ、問題を図で比較して対応を選びたい",
+    "include": ["summary", "progress", "visual", "decision", "details"],
+    "exclude": []
+  },
+  {
+    "id": 8,
+    "name": "private-report",
+    "message": "private repoのdiffを初心者向けに説明して。外部公開しない",
+    "include": ["walkthrough", "evidence"],
+    "exclude": [],
+    "reason": "private_local_only"
+  },
+  {
+    "id": 9,
+    "name": "existing-record-artifact",
+    "message": "既存のlocal previewは検証記録。内容を説明するだけで判断不要",
+    "include": ["walkthrough"],
+    "exclude": ["decision"]
+  },
+  {
+    "id": 10,
+    "name": "explicit-component-controls",
+    "message": "[summary:on] [visual:on] [decision:on] 3案を詳しく説明して",
+    "include": ["summary", "visual", "decision", "walkthrough"],
+    "exclude": []
+  }
+]

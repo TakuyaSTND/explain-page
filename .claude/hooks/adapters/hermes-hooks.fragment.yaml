@@ -1,0 +1,25 @@
+hooks:
+  pre_llm_call:
+    - command: >-
+        {{PYTHON}} {{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py
+        --runtime hermes
+        --project-root {{PROJECT_ROOT}}
+      timeout: 15
+  post_tool_call:
+    - command: >-
+        {{PYTHON}} {{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py
+        --runtime hermes
+        --project-root {{PROJECT_ROOT}}
+      timeout: 15
+  subagent_stop:
+    - command: >-
+        {{PYTHON}} {{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py
+        --runtime hermes
+        --project-root {{PROJECT_ROOT}}
+      timeout: 15
+  pre_verify:
+    - command: >-
+        {{PYTHON}} {{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py
+        --runtime hermes
+        --project-root {{PROJECT_ROOT}}
+      timeout: 15

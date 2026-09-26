@@ -1,0 +1,1 @@
+"""Understanding Composer hook core."""
