@@ -21,9 +21,13 @@ Layout notes (readability fixes):
   * Bars and line points carry a small value label so the exact number is
     readable without hovering; line labels thin out when there are many
     points.
-  * A bar whose value lands exactly on the baseline (typically zero) still
-    draws a short, thick "zero mark" so the reader can tell the value is
-    zero rather than missing.
+  * A bar chart's value axis always contains zero (a line chart's fits the
+    data), because a bar's length is read as the value itself.
+  * A bar whose value is zero still draws a short, thick "zero mark" so the
+    reader can tell the value is zero rather than missing.
+  * When the label under the lowest negative bar would spill onto the
+    X-axis labels, the plot's bottom edge rises just enough for it; the
+    ticks do not change.
   * Long or numerous X-axis labels wrap onto two lines, or rotate, instead
     of colliding with their neighbors.
 """
@@ -61,6 +65,13 @@ _XLABEL_ROTATE_EXTRA = 28.0
 
 _TICK_COUNT = 5
 _ZERO_EPS = 1e-9
+
+# A negative bar's value label hangs this far below the bar end. Its text
+# reaches 0.31em below the baseline in Chromium with the page's font chain
+# (Zen Kaku Gothic New ...), so 0.32em is used.
+_VALUE_LABEL_FONT_SIZE = 10.5
+_VALUE_LABEL_BELOW = 12.0
+_TEXT_DESCENT_EM = 0.32
 
 # Colors must stay within the fixed CSS-variable palette the renderer
 # already exposes -- charts never introduce a new color.
@@ -214,12 +225,25 @@ def _validate(spec: Mapping[str, Any]) -> Tuple[str, str, List[str], List[_Serie
     if resolved_min > resolved_max:
         resolved_min, resolved_max = resolved_max, resolved_min
 
+    if kind == "bar":
+        # A bar's length encodes the value itself, so the value axis must
+        # contain zero -- also over an explicit y_min / y_max. Flooring the
+        # axis at the data (1155..3577 -> 1000..4000) drew 1155 at ~1/10 of
+        # 2501 when the real ratio is ~1/2. Lines keep fitting the data:
+        # they encode change by position, not by length.
+        resolved_min = min(resolved_min, 0.0)
+        resolved_max = max(resolved_max, 0.0)
+
     if resolved_min == resolved_max:
-        # Keep zero on the axis when the flat value is zero; otherwise pad
-        # symmetrically so a single repeated value still renders sanely.
-        pad = 1.0 if resolved_min == 0 else abs(resolved_min) * 0.1 or 1.0
-        resolved_min -= pad
-        resolved_max += pad
+        if kind == "bar":
+            # Only reachable when every bar is zero: keep 0 as the floor.
+            resolved_max = 1.0
+        else:
+            # Keep zero on the axis when the flat value is zero; otherwise
+            # pad symmetrically so a single repeated value renders sanely.
+            pad = 1.0 if resolved_min == 0 else abs(resolved_min) * 0.1 or 1.0
+            resolved_min -= pad
+            resolved_max += pad
 
     return kind, title, labels, series, unit, resolved_min, resolved_max
 
@@ -525,13 +549,9 @@ def _render_bar_marks(
     bar_w = band_usable / num_series
     gap_ratio = 0.85  # leave a small visible gap between bars in a group
 
-    if y_min <= 0 <= y_max:
-        baseline_value = 0.0
-    elif y_min > 0:
-        baseline_value = y_min
-    else:
-        baseline_value = y_max
-    baseline_px = _y_to_px(baseline_value, y_min, y_max, layout)
+    # _validate always puts zero inside a bar chart's range, so every bar
+    # grows from the real zero line.
+    baseline_px = _y_to_px(0.0, y_min, y_max, layout)
 
     marks: List[str] = []
     for idx in range(n):
@@ -544,10 +564,9 @@ def _render_bar_marks(
             drawn_w = bar_w * gap_ratio
             bar_x = group_left + s_idx * bar_w + (bar_w - drawn_w) / 2.0
             # A *value* of zero is the case callers actually care about
-            # ("is there data here at all"); a bar whose height merely
-            # collapses to zero because it lands on a non-zero baseline
-            # (e.g. an all-positive series where the axis starts above 0)
-            # is a different, purely geometric edge case handled below.
+            # ("is there data here at all"); a nonzero bar too small for
+            # the axis span to show is a purely geometric edge case
+            # handled below.
             is_true_zero = abs(value) < _ZERO_EPS
 
             if is_true_zero:
@@ -575,14 +594,41 @@ def _render_bar_marks(
             if value_px <= baseline_px:
                 label_y = value_px - 4.0
             else:
-                label_y = value_px + 12.0
+                label_y = value_px + _VALUE_LABEL_BELOW
             label_y = max(label_y, layout.top - 2.0)
             text = escape(_fmt_num(value) + unit, quote=True)
             marks.append(
                 '<text class="chart-value-label" x="%.1f" y="%.1f" text-anchor="middle" '
-                'fill="var(--ink-2)" font-size="10.5">%s</text>' % (label_x, label_y, text)
+                'fill="var(--ink-2)" font-size="%g">%s</text>'
+                % (label_x, label_y, _VALUE_LABEL_FONT_SIZE, text)
             )
     return marks
+
+
+def _reserve_negative_label_room(
+    series: List[_Series], y_min: float, y_max: float, layout: _Layout
+) -> _Layout:
+    """Raise the plot's bottom edge just enough for the lowest negative label.
+
+    A negative bar's value label hangs below the bar end, so a bar that
+    reaches (or nearly reaches) the bottom of the axis spilled its label onto
+    the x-axis labels ("-4億円" over "2024"). The ticks stay as they are; only
+    the plot gets shorter, so that label ends at the original bottom edge,
+    which is clear of the x-axis labels. Charts whose labels already fit come
+    back unchanged.
+    """
+    lowest = min(v for s in series for v in s.values)
+    if lowest >= 0:
+        return layout
+    need = _VALUE_LABEL_BELOW + _TEXT_DESCENT_EM * _VALUE_LABEL_FONT_SIZE
+    # The lowest bar end sits frac * height above the bottom; after raising
+    # the bottom by pad it sits frac * (height - pad) above the new bottom.
+    # The smallest pad with pad + frac * (height - pad) >= need is:
+    frac = (lowest - y_min) / (y_max - y_min)
+    pad = (need - frac * layout.height) / (1.0 - frac)
+    if pad <= 0:
+        return layout
+    return layout._replace(bottom=layout.bottom - pad)
 
 
 def render_chart(spec: Mapping[str, Any]) -> str:
@@ -626,6 +672,9 @@ def render_chart(spec: Mapping[str, Any]) -> str:
     )
 
     x_label_parts = _render_x_labels(labels, layout, mode)
+    if kind == "bar":
+        # The x-axis labels stay put; only the plot above them may shrink.
+        layout = _reserve_negative_label_room(series, y_min, y_max, layout)
     background, foreground_frame = _render_frame(
         title, unit, ticks, layout, legend_rows, y_min, y_max, x_label_parts
     )

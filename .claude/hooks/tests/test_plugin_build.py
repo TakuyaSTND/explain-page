@@ -212,6 +212,16 @@ class HooksJsonShapeTests(unittest.TestCase):
         )
         self.assertEqual(data["name"], branding.PRODUCT_NAME)
 
+    def test_plugin_manifest_has_no_version(self):
+        # 2026-10-01（利用者の選択）：version を書くと、作者が変えるまで入れた人に更新が
+        #   届かない（Claude Code は版の番号で更新を見分ける）＝書かずにコミットの番号を版にする。
+        data = json.loads(
+            (PLUGIN_BUILD_ROOT / ".claude-plugin" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertNotIn("version", data)
+
 
 class CheckDetectsDriftTests(unittest.TestCase):
     """③ --check が一致なら0、正本を1バイト変えた写しに対しては1。"""

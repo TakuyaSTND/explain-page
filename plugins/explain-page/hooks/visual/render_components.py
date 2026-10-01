@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 
 from .contracts import ExplanationPlan
 from .glossary import GlossaryEntry
+from .term_boundary import find_term
 
 # 2026-09-08：担当Bのグラフ・担当Cの数式は並行作業なので、無い間もこのファイルが
 # 動くよう遅延importにする（無ければ表・codeへ自動で落ちる＝黙って消さない）。
@@ -224,20 +225,10 @@ def _tone(label: str) -> str:
     return "neutral"
 
 
-def _ascii_word_char(value: str) -> bool:
-    return bool(value) and value.isascii() and (value.isalnum() or value == "_")
-
-
 def _find_term(text: str, term: str, start: int) -> int:
-    position = text.find(term, start)
-    while position >= 0:
-        before = text[position - 1] if position > 0 else ""
-        after_index = position + len(term)
-        after = text[after_index] if after_index < len(text) else ""
-        if not (_ascii_word_char(before) or _ascii_word_char(after)):
-            return position
-        position = text.find(term, position + 1)
-    return -1
+    # 2026-09-29：語の境目の規則は検品器と共通（term_boundary.py）。部分一致だったので
+    #   「目盛り」の中の「盛り」やファイル名の中の feedback に説明が付いていた。
+    return find_term(text, term, start)
 
 
 def _count_term(text: str, term: str) -> int:

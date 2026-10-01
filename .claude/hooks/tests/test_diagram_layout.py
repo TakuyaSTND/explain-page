@@ -1087,5 +1087,188 @@ class TestExplicitPlacementLeftDetourLabel(unittest.TestCase):
             self.assertLessEqual(x + w, layout.width, "ラベル(%s)が図の右の外へ出ている" % route.label)
 
 
+def _route_segments(route) -> list:
+    pts = _route_path_points(route)
+    return list(zip(pts, pts[1:]))
+
+
+def _routes_cross(a, b) -> bool:
+    """2本の経路の線分どうしが（端点どうしの接触を除いて）交わるか。"""
+    for a1, a2 in _route_segments(a):
+        for b1, b2 in _route_segments(b):
+            if _segments_cross(a1, a2, b1, b2):
+                return True
+    return False
+
+
+class TestExplicitDirectionAndDirectedChain(unittest.TestCase):
+    """2026-09-28 の実測で見つかった2つの崩れの再現。
+
+    ①`"direction": "vertical"` を渡しても出力が1バイトも変わらなかった＝列幅に収める組み方
+      （max_width を渡したとき）が direction を見ていなかった。
+    ②1つの箱から2つへ広がる形（anyone→pub・anyone→old）を、向きを無視して pub–anyone–old の
+      鎖と見て横一列に並べた＝真ん中の anyone から矢印が左右へ外向きに出て、390px では右端の
+      箱が横スクロールの先に隠れた。本文が短いと横、少し長いと縦になっていた。
+    """
+
+    SHORT = [
+        {"id": "anyone", "title": "だれでも使える入口", "text": "頁を組む道具を呼ぶ"},
+        {"id": "pub", "title": "公開用の置き場", "text": "書き出して送る先"},
+        {"id": "old", "title": "古い履歴の置き場", "text": "非公開のまま残す"},
+    ]
+    LONGER = [
+        {"id": "anyone", "title": "だれでも使える頁の入口", "text": "頁を組む道具を最初に呼ぶ"},
+        {"id": "pub", "title": "公開用の手元の置き場", "text": "書き出して送る先の保管場所"},
+        {"id": "old", "title": "古い履歴の置き場所です", "text": "非公開のまま残しておく所"},
+    ]
+    FAN_OUT = [{"from": "anyone", "to": "pub"}, {"from": "anyone", "to": "old"}]
+    CHAIN = [{"from": "anyone", "to": "pub"}, {"from": "pub", "to": "old"}]
+
+    def _assert_root_above_centered_children(self, layout) -> None:
+        root, pub, old = layout.boxes
+        self.assertEqual(layout.orientation, "TB")
+        self.assertEqual(round(pub.y, 3), round(old.y, 3), "広がった先の2つは同じ段のはず")
+        self.assertGreater(pub.y, root.y + root.h, "広がった先は根より下の段のはず")
+        children_center = (min(pub.x, old.x) + max(pub.x + pub.w, old.x + old.w)) / 2.0
+        self.assertAlmostEqual(root.x + root.w / 2.0, children_center, delta=1.0)
+
+    def test_fan_out_is_not_laid_out_as_a_single_row(self) -> None:
+        for name, nodes in (("短い本文", self.SHORT), ("少し長い本文", self.LONGER)):
+            with self.subTest(name):
+                layout = layout_diagram(nodes, self.FAN_OUT, max_width=720)
+                self._assert_root_above_centered_children(layout)
+                self.assertLessEqual(layout.width, 720.0)
+
+    def test_fan_in_is_not_laid_out_as_a_single_row(self) -> None:
+        edges = [{"from": "pub", "to": "anyone"}, {"from": "old", "to": "anyone"}]
+        layout = layout_diagram(self.SHORT, edges, max_width=720)
+        root, pub, old = layout.boxes
+        self.assertEqual(layout.orientation, "TB")
+        self.assertEqual(round(pub.y, 3), round(old.y, 3))
+        self.assertGreater(root.y, pub.y + pub.h, "集まる先は下の段のはず")
+
+    def test_a_back_edge_does_not_turn_a_fan_out_into_a_chain(self) -> None:
+        # old→anyone を足すと、向きだけ見れば old→anyone→pub の鎖になる。層の計算と同じく
+        # 戻る辺を除いた辺で判定する＝根の anyone は上の段のまま。
+        edges = self.FAN_OUT + [{"from": "old", "to": "anyone", "label": "戻す"}]
+        layout = layout_diagram(self.SHORT, edges, max_width=720)
+        self._assert_root_above_centered_children(layout)
+
+    def test_a_chain_written_backwards_reads_left_to_right(self) -> None:
+        edges = [{"from": "old", "to": "pub"}, {"from": "pub", "to": "anyone"}]
+        layout = layout_diagram(self.SHORT, edges, max_width=720)
+        self.assertEqual(layout.orientation, "LR")
+        for route in layout.routes:
+            self.assertGreater(route.points[-1][0], route.points[0][0], "矢印が右から左を向いている")
+
+    def test_vertical_is_honored_for_a_chain_that_would_fit_in_one_row(self) -> None:
+        auto = layout_diagram(self.SHORT, self.CHAIN, max_width=720)
+        self.assertEqual(auto.orientation, "LR", "前提＝指定が無ければ横1行に収まる鎖")
+        layout = layout_diagram(self.SHORT, self.CHAIN, direction="vertical", max_width=720)
+        self.assertEqual(layout.orientation, "TB")
+        self.assertEqual(len({round(b.y, 3) for b in layout.boxes}), 3, "鎖3個は3段のはず")
+        self.assertLessEqual(layout.width, 720.0)
+
+    def test_horizontal_is_honored_for_a_fan_out(self) -> None:
+        layout = layout_diagram(self.SHORT, self.FAN_OUT, direction="horizontal", max_width=720)
+        root, pub, old = layout.boxes
+        self.assertEqual(layout.orientation, "LR")
+        self.assertEqual(len({round(b.y, 3) for b in layout.boxes}), 1, "横1行のはず")
+        self.assertLess(root.x, min(pub.x, old.x), "根がいちばん左のはず")
+        row_bottom = max(b.y + b.h for b in layout.boxes)
+        for route in layout.routes:
+            self.assertGreater(route.points[-1][0], route.points[0][0], "矢印が右から左を向いている")
+            for index, box in enumerate(layout.boxes):
+                if index not in (route.from_index, route.to_index):
+                    self.assertTrue(_route_avoids_box(route, box, pad=2.0), "辺が間の箱%dを横切る" % index)
+        skip = [r for r in layout.routes if abs(r.to_index - r.from_index) == 2]
+        self.assertEqual(len(skip), 1)
+        self.assertTrue(all(y > row_bottom for _, y in skip[0].points[1:-1]), "飛ばす辺は行の下を回るはず")
+
+    def test_the_three_directions_give_different_layouts_for_a_fan_out(self) -> None:
+        by_direction = {
+            d: layout_diagram(self.SHORT, self.FAN_OUT, direction=d, max_width=720)
+            for d in ("auto", "vertical", "horizontal")
+        }
+        self.assertEqual(by_direction["auto"].orientation, "TB")
+        self.assertEqual(by_direction["vertical"].orientation, "TB")
+        self.assertEqual(by_direction["horizontal"].orientation, "LR")
+
+    def test_horizontal_skip_and_back_edges_do_not_share_a_line(self) -> None:
+        # 飛ばす辺 anyone→old と戻る辺 old→anyone が、同じ出入口・同じ横線を通っていた（実測）。
+        edges = self.FAN_OUT + [{"from": "old", "to": "anyone", "label": "戻す"}]
+        layout = layout_diagram(self.SHORT, edges, direction="horizontal", max_width=720)
+        routes = layout.routes
+        for i, a in enumerate(routes):
+            for b in routes[i + 1:]:
+                for a1, a2 in zip(a.points, a.points[1:]):
+                    for b1, b2 in zip(b.points, b.points[1:]):
+                        self.assertFalse(
+                            _segments_overlap_collinear(a1, a2, b1, b2),
+                            "辺%d→%dと辺%d→%dが同じ線を通っている"
+                            % (a.from_index, a.to_index, b.from_index, b.to_index),
+                        )
+        under = [r for r in routes if len(r.points) == 4]
+        self.assertEqual(len(under), 2)
+        self.assertFalse(_routes_cross(under[0], under[1]), "行の下を回る2本が交わっている（入れ子でない）")
+
+    def test_a_label_between_nested_detours_sits_closer_to_its_own_line(self) -> None:
+        # 撮影で確認＝入れ子の2本の上の線のラベル「残す」が、自分の線と下の線のちょうど
+        # 真ん中（どちらからも12px）に来て、どちらのラベルか読めなかった。
+        edges = [
+            {"from": "anyone", "to": "pub"},
+            {"from": "anyone", "to": "old", "label": "残す"},
+            {"from": "old", "to": "anyone", "label": "戻す"},
+        ]
+        layout = layout_diagram(self.SHORT, edges, direction="horizontal", max_width=720)
+        under = [r for r in layout.routes if len(r.points) == 4]
+        self.assertEqual(len(under), 2)
+        for route in under:
+            own = abs(route.label_y - route.points[1][1])
+            for other in under:
+                if other is route:
+                    continue
+                self.assertLess(
+                    own * 1.5, abs(route.label_y - other.points[1][1]),
+                    "ラベル(%s)が自分の線より別の線に近い／同じくらい" % route.label,
+                )
+
+    def test_horizontal_fan_out_of_three_nests_the_detours(self) -> None:
+        nodes = [{"id": k, "title": "箱" + k, "text": "本文"} for k in "ABCD"]
+        edges = [{"from": "A", "to": k, "label": "枝" + k} for k in "BCD"]
+        layout = layout_diagram(nodes, edges, direction="horizontal", max_width=720)
+        self.assertEqual(layout.orientation, "LR")
+        under = [r for r in layout.routes if len(r.points) == 4]
+        self.assertEqual(len(under), 2, "A→C と A→D が行の下を回るはず")
+        self.assertNotEqual(under[0].points[0], under[1].points[0], "同じ箱の出口が重なっている")
+        self.assertFalse(_routes_cross(under[0], under[1]), "行の下を回る2本が交わっている")
+        for route in layout.routes:
+            for index, box in enumerate(layout.boxes):
+                self.assertFalse(
+                    _rects_overlap(_label_rect(route), _box_rect(box)),
+                    "ラベル(%s)が箱%dと重なっている" % (route.label, index),
+                )
+
+    def test_rendered_svg_changes_with_direction(self) -> None:
+        # 報告された症状そのもの＝描画した頁の図が向きの指定で変わらなかった（同じバイト数）。
+        from visual.contracts import ExplanationPlan
+        from visual.render_components import render_components
+
+        plan = ExplanationPlan(
+            audience="project_novice", depth="deep", components=("diagram",), reason_codes=(),
+            provisional=False, should_continue=False, delivery="local_html", publish_policy="never",
+        )
+
+        def render(direction: str) -> str:
+            spec = {"nodes": self.SHORT, "edges": self.CHAIN}
+            if direction:
+                spec["direction"] = direction
+            return render_components(plan, title="図", content={"diagram": spec})
+
+        auto, vertical, horizontal = render(""), render("vertical"), render("horizontal")
+        self.assertNotEqual(auto, vertical)
+        self.assertEqual(auto, horizontal, "向きの揃った短い鎖は、指定が無くても横1行")
+
+
 if __name__ == "__main__":
     unittest.main()

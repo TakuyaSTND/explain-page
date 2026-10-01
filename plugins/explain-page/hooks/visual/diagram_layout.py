@@ -104,6 +104,9 @@ LABEL_HALF_H = 10.0
 # ずらす幅と、2本目以降の横線を下へずらす幅（ラベルの高さ＋余白＝線とラベルが重ならない）。
 UNDER_ROW_PORT = 10.0
 UNDER_ROW_STAGGER = 24.0
+# 2026-09-28：上の横線のラベル（線の12px下）と下の横線が横に重なるとき、下の横線をさらに
+# 下げる幅＝ラベルから自分の線まで12px・下の線まで24px（どちらの線のラベルか読める）。
+UNDER_ROW_LABEL_EXTRA = 12.0
 # 2026-09-26：組み上がりが max_width を超えたときに、層の箱の幅の上限を下げて組み直す回数と、
 # 1回に下げる幅の最小（行の中央揃えで、箱を少し狭めても全体の幅が同じだけは縮まないため）。
 FIT_RETRIES = 6
@@ -630,8 +633,23 @@ def _place_layered(boxes: list[dict], edges: Sequence[dict], max_cols: int) -> N
     _apply_grid_positions(boxes, col_of, row_of)
 
 
-def _detect_chain(n: int, edges: Sequence[dict]) -> Optional[list[int]]:
-    """辺が『枝分かれの無い一本の鎖』ならその順番を返す。それ以外は None。"""
+def _detect_chain(
+    n: int, edges: Sequence[dict], directed_edges: Optional[Sequence[dict]] = None
+) -> Optional[list[int]]:
+    """辺が『枝分かれの無い一本の鎖』で、しかも辺の向きが揃っている（A→B→C）なら
+    その順番を返す。それ以外は None。
+
+    2026-09-28（実測＝1つの箱から2つへ広がる形 A→B・A→C を、向きを無視して B–A–C の
+    鎖と見て横一列に並べた。真ん中の A から矢印が左右へ外向きに出て、390px では右端の
+    箱が横スクロールの先に隠れた）：向きを無視した隣り合いで一本道になることに加え、
+    隣どうしのすべての組に「並べる順の向き」の辺が1本以上あることを求める。
+    広がる形（A→B・A→C）と集まる形（B→A・C→A）はどちらの順でも満たさない＝None。
+
+    directed_edges＝向きを確かめる辺（既定＝edges 全部）。列幅に収める組み方は「戻る辺を
+    除いた辺」を渡す＝層の計算と同じ辺で向きを見る（戻る辺 old→anyone を足しただけで
+    old→anyone→pub を鎖と見て、根の anyone が真ん中に来るのを防ぐ）。戻る辺は隣どうしの
+    組にある限り残してよい（行の下を回して描く）。
+    """
     if n == 0:
         return None
     if n == 1:
@@ -666,7 +684,16 @@ def _detect_chain(n: int, edges: Sequence[dict]) -> Optional[list[int]]:
         order.append(nxt)
         visited.add(nxt)
         prev, current = current, nxt
-    return order if len(order) == n else None
+    if len(order) != n:
+        return None
+    pool = edges if directed_edges is None else directed_edges
+    directed = {(e["from_index"], e["to_index"]) for e in pool}
+    # 見つけた順（小さい番号の端から）を先に試し、駄目なら逆順を試す＝向きの揃った
+    # 鎖では従来と同じ順を返す。
+    for candidate in (order, order[::-1]):
+        if all((candidate[k], candidate[k + 1]) in directed for k in range(n - 1)):
+            return candidate
+    return None
 
 
 def _find_back_edge_indices(n: int, edges: Sequence[dict]) -> set[int]:
@@ -757,6 +784,8 @@ def _detour_under_row(
     tcx: float,
     bottom_y: float,
     curve: bool,
+    s_slot: int = 0,
+    t_slot: int = 0,
 ) -> tuple[list[tuple[float, float]], Optional[tuple]]:
     """全部の箱が1行に並ぶ図（LR）の戻る辺＝行の下を U 字に回る（2026-09-25 新設）。
 
@@ -767,10 +796,20 @@ def _detour_under_row(
     出入口は箱の中心から UNDER_ROW_PORT だけずらす＝同じ箱が「戻る辺の到着点」と
     「別の戻る辺の出発点」を兼ねるとき、2本の縦線が重ならず、横線とも交わらない
     （左へ戻る辺は出発を中心の左・到着を中心の右に置く）。
+
+    2026-09-28（横1行の明示で、右へ間の箱を飛ばす辺もここを通るようになった。実測＝右へ
+    飛ばす辺の出口と、左へ戻る辺の入口が同じ点になり縦の線が重なった）：中心からの距離を
+    UNDER_ROW_PORT の倍数で分ける＝左へ戻る辺は奇数倍（1・3・5…）、右へ飛ばす辺は偶数倍
+    （2・4・6…）。同じ箱の同じ側に出入口が2つ以上あるときは s_slot／t_slot（0始まり）で
+    さらに外へずらす。s_slot＝t_slot＝0 の左へ戻る辺は従来と同じ位置。箱の縁から
+    BOX_SAFETY_PAD より外へは出さない。
     """
     leftward = tcx < scx
-    s_port = min(UNDER_ROW_PORT, float(source["w"]) / 4.0)
-    t_port = min(UNDER_ROW_PORT, float(target["w"]) / 4.0)
+    base = 1 if leftward else 2
+    s_unit = min(UNDER_ROW_PORT, float(source["w"]) / 4.0)
+    t_unit = min(UNDER_ROW_PORT, float(target["w"]) / 4.0)
+    s_port = min(s_unit * (base + 2 * s_slot), float(source["w"]) / 2.0 - BOX_SAFETY_PAD)
+    t_port = min(t_unit * (base + 2 * t_slot), float(target["w"]) / 2.0 - BOX_SAFETY_PAD)
     sx = scx - s_port if leftward else scx + s_port
     tx = tcx + t_port if leftward else tcx - t_port
     start = (sx, source["y"] + source["h"])
@@ -789,8 +828,11 @@ def _route_points_row_primary(
     smooth: bool = False,
     force_far: bool = False,
     under_row: bool = False,
+    port_slots: tuple[int, int] = (0, 0),
 ) -> tuple[list[tuple[float, float]], Optional[tuple]]:
     """2つの箱を結ぶ経路（_row を「層＝主軸」とみなす向き）。
+
+    port_slots＝行の下を回るときの (出発, 到着) の出入口の番号（`_detour_under_row`）。
 
     under_row＝True（2026-09-25・全部の箱が1行に並ぶ LR の図の戻る辺）のときは、
     右側面を回る迂回の代わりに、行の下を U 字に回る（`_detour_under_row`）。行・列が隣り合っていれば
@@ -812,7 +854,9 @@ def _route_points_row_primary(
 
     if force_far:
         if under_row:
-            return _detour_under_row(source, target, scx, tcx, bottom_y, curve)
+            return _detour_under_row(
+                source, target, scx, tcx, bottom_y, curve, port_slots[0], port_slots[1]
+            )
         return _detour_vertical(source, target, scx, scy, tcx, tcy, side_x, curve)
 
     s_row, s_col = source.get("_row", 0), source.get("_col", 0)
@@ -1299,6 +1343,68 @@ def _build_routes(boxes: list[dict], edges: Sequence[dict]) -> list[Route]:
     return routes
 
 
+def _under_row_plan(
+    boxes: Sequence[dict], edges: Sequence[dict], back_edges: set[int]
+) -> tuple[dict[int, float], dict[int, tuple[int, int]]]:
+    """全部の箱が1行に並ぶ図で、行の下を回す辺の「横線の深さ」と「出入口の番号」を決める
+    （2026-09-28 新設）。戻り値＝(辺の索引→行の下の横線（bottom_y）からの深さ px,
+    辺の索引→(出発の番号, 到着の番号))。
+
+    行の下を回すのは、戻る辺と、間の箱を飛ばす辺（横1行の明示でだけできる）。
+    ・段＝飛ばす箱の数が少ない辺ほど浅い。同じなら右向きの辺を先に（右向きの出入口は
+      中心から遠いので、同じ2箱を結ぶ左向きの辺の内側に収まる）、それも同じなら辺の順。
+      戻る辺だけの図（隣どうし・全部左向き）では、従来どおり辺の順に1段ずつ下がる。
+    ・深さ＝1段ごとに UNDER_ROW_STAGGER。ただし上の段にラベルがあり、すぐ下の段と横の
+      範囲（両端の箱の中心の間）が重なるときは、さらに UNDER_ROW_LABEL_EXTRA 下げる
+      （撮影で確認＝同じ2箱を結ぶ2本が入れ子になると、上の段のラベルが自分の線と下の
+      線のちょうど真ん中に来て、どちらのラベルか読めなかった）。範囲が端で接するだけの
+      図（戻る辺が隣どうしに1本ずつ）は従来と同じ深さ。
+    ・出入口＝同じ箱の同じ側（出発／到着×左向き／右向き）に2本以上あれば、深い段の辺
+      ほど中心寄り（番号0）にする。浅い段の横線の範囲の外で深い段の線が下りるので、
+      2本が入れ子になり、交わらない。
+    """
+    under: list[int] = []
+    span: dict[int, int] = {}
+    leftward: dict[int, bool] = {}
+    for i, e in enumerate(edges):
+        s, t = boxes[e["from_index"]], boxes[e["to_index"]]
+        gap = abs(s.get("_col", 0) - t.get("_col", 0))
+        if i in back_edges or gap > 1:
+            under.append(i)
+            span[i] = gap
+            leftward[i] = t["x"] + t["w"] / 2.0 < s["x"] + s["w"] / 2.0
+    ordered = sorted(under, key=lambda i: (span[i], leftward[i], i))
+    lanes = {i: k for k, i in enumerate(ordered)}
+
+    def reach(i: int) -> tuple[float, float]:
+        s, t = boxes[edges[i]["from_index"]], boxes[edges[i]["to_index"]]
+        cs, ct = s["x"] + s["w"] / 2.0, t["x"] + t["w"] / 2.0
+        return min(cs, ct), max(cs, ct)
+
+    depth: dict[int, float] = {}
+    y = 0.0
+    for k, i in enumerate(ordered):
+        depth[i] = y
+        if k + 1 < len(ordered):
+            y += UNDER_ROW_STAGGER
+            (lo_a, hi_a), (lo_b, hi_b) = reach(i), reach(ordered[k + 1])
+            if edges[i].get("label") and min(hi_a, hi_b) - max(lo_a, lo_b) > 0.0:
+                y += UNDER_ROW_LABEL_EXTRA
+    groups: dict[tuple[int, str, bool], list[int]] = {}
+    for i in under:
+        e = edges[i]
+        groups.setdefault((e["from_index"], "out", leftward[i]), []).append(i)
+        groups.setdefault((e["to_index"], "in", leftward[i]), []).append(i)
+    s_slot: dict[int, int] = {}
+    t_slot: dict[int, int] = {}
+    for (_box, end, _left), members in groups.items():
+        target_map = s_slot if end == "out" else t_slot
+        for k, i in enumerate(sorted(members, key=lambda i: (-lanes[i], i))):
+            target_map[i] = k
+    slots = {i: (s_slot.get(i, 0), t_slot.get(i, 0)) for i in under}
+    return depth, slots
+
+
 def _build_routes_layered(
     boxes: list[dict], edges: Sequence[dict], back_edges: set[int]
 ) -> list[Route]:
@@ -1332,7 +1438,7 @@ def _build_routes_layered(
     detour_count = 0
     # 2026-09-25：全部の箱が1行に並ぶ図（LR）では、戻る辺を行の下へ U 字に回す。
     single_row = len({b.get("_row", 0) for b in boxes}) == 1
-    under_row_count = 0
+    lane_depth, slots = _under_row_plan(boxes, edges, back_edges) if single_row else ({}, {})
     for i, e in enumerate(edges):
         source = boxes[e["from_index"]]
         target = boxes[e["to_index"]]
@@ -1342,11 +1448,9 @@ def _build_routes_layered(
         # すべて row_gap<=1 が前提のため）＝ここで先読みして side_x をずらせる。
         row_gap = abs(source.get("_row", 0) - target.get("_row", 0))
         expects_detour = is_back or row_gap > 1
-        under_row = is_back and single_row
+        under_row = i in lane_depth
         route_side_x = side_x + DETOUR_SIDE_STAGGER * detour_count if expects_detour else side_x
-        route_bottom_y = (
-            bottom_y + UNDER_ROW_STAGGER * under_row_count if under_row else bottom_y
-        )
+        route_bottom_y = bottom_y + lane_depth[i] if under_row else bottom_y
         points, control = _route_points_row_primary(
             source,
             target,
@@ -1354,12 +1458,11 @@ def _build_routes_layered(
             route_side_x,
             route_bottom_y,
             smooth=True,
-            force_far=is_back,
+            force_far=is_back or under_row,
             under_row=under_row,
+            port_slots=slots.get(i, (0, 0)),
         )
-        if under_row:
-            under_row_count += 1
-        elif expects_detour:
+        if not under_row and expects_detour:
             detour_count += 1
         if _route_hits_other_box(points, control, boxes, e["from_index"], e["to_index"]):
             fallback_left_x = left_x - DETOUR_SIDE_STAGGER * detour_count
@@ -1501,8 +1604,10 @@ def _translate(boxes: Sequence[dict], routes: Sequence[Route], dx: float, dy: fl
 # 列幅（max_width）に収める専用エンジン（2026-09-12 新設）
 # ---------------------------------------------------------------------------
 #
-# 方針＝①辺が「枝分かれの無い一本の鎖」（_detect_chain）なら、横1行（LR）に
-#   並べた幅が max_width に収まるかを試す。収まればそれを使う。
+# 方針＝①辺が「枝分かれの無い一本の鎖」で向きが揃っている（_detect_chain・A→B→C。
+#   広がる形 A→B・A→C は鎖ではない＝2026-09-28）なら、横1行（LR）に並べた幅が
+#   max_width に収まるかを試す。収まればそれを使う。
+#   明示の向き（direction="vertical"／"horizontal"）があれば、それを優先する（2026-09-28）。
 # ②収まらない、または枝分かれ（扇状・合流・DAG）があるなら、層（辺の向きから
 #   の深さ・戻る辺は除いて計算）を縦に積む（TB）。1つの層の横幅が max_width を
 #   超えるならその層を2段以上に折る。層の中の箱は共通の中心線で中央揃えする
@@ -1623,11 +1728,19 @@ def _place_layered_fit(
     edges: Sequence[dict],
     max_width: float,
     max_box_w: float = LAYERED_MAX_BOX_W,
+    direction: str = "auto",
 ) -> tuple[str, set[int]]:
     """max_width に収める配置。戻り値＝(orientation, 戻る辺の索引集合)。
 
     max_box_w＝層の箱の幅の上限（既定 LAYERED_MAX_BOX_W）。組み上がりが max_width を
     超えたとき、呼び出し側がこれを下げて組み直す（2026-09-26）。
+
+    direction（2026-09-28・それまでは受け取らず、明示の向きが黙って無視された）：
+    "vertical"＝鎖でも横1行にせず、層を縦に積む。"horizontal"＝必ず横1行に並べる
+    （層の順＝戻る辺以外の矢印は左から右。間の箱を飛ばす辺は行の下を回す。max_width を
+    超えても1行のまま＝狭い画面では横スクロール）。それ以外＝従来どおり「向きの揃った
+    鎖で max_width に収まるなら横1行、そうでなければ縦」。向きの揃った鎖では、鎖の順と
+    層の順は同じになる（i 番目の箱が i 番目の層）。
     """
     n = len(boxes)
     back = _find_back_edge_indices(n, edges)
@@ -1652,11 +1765,13 @@ def _place_layered_fit(
             boxes[i]["w"] = w
     layer_w = {lk: boxes[layers[lk][0]]["w"] for lk in layer_keys}
 
-    chain = _detect_chain(n, edges)
-    if chain is not None:
-        total_w = _lr_chain_width(chain, boxes)
-        if total_w <= max_width:
-            _apply_lr_chain_positions(boxes, chain)
+    if direction != "vertical":
+        chain = _detect_chain(n, edges, forward)
+        if direction == "horizontal" or (
+            chain is not None and _lr_chain_width(chain, boxes) <= max_width
+        ):
+            order = chain if chain is not None else [i for lk in layer_keys for i in layers[lk]]
+            _apply_lr_chain_positions(boxes, order)
             return "LR", back
 
     _apply_tb_positions(boxes, layers, layer_keys, layer_w, max_width, label_gap_after)
@@ -1767,7 +1882,7 @@ def _layout_diagram_core(
                 # 前の試みで並べた箱は捨て、下ごしらえからやり直す（並べていない箱を返さない）。
                 boxes, id_map = _prepare_nodes(node_list, float(font_px_num))
             orientation, back_edges = _place_layered_fit(  # type: ignore[arg-type]
-                boxes, resolved_edges, max_width_num, max_box_w=cap
+                boxes, resolved_edges, max_width_num, max_box_w=cap, direction=direction_norm
             )
             routes = _build_routes_layered(boxes, resolved_edges, back_edges)
             width, height = _compute_bounds(

@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared",
+            "commandWindows": "& '{{BASH}}' -lc \"PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared\"",
+            "statusMessage": "説明の頁の構成を準備する",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|apply_patch|Artifact|open_preview",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared",
+            "commandWindows": "& '{{BASH}}' -lc \"PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared\"",
+            "statusMessage": "頁の検品の記録を作る",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared",
+            "commandWindows": "& '{{BASH}}' -lc \"PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared\"",
+            "statusMessage": "サブエージェントの結果をまとめる",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared",
+            "commandWindows": "& '{{BASH}}' -lc \"PYTHONUTF8=1 '{{PYTHON}}' '{{EXPLAIN_PAGE_ROOT}}/.claude/hooks/understanding-composer.py' --runtime codex --shared\"",
+            "statusMessage": "頁の部品の不足を確かめる",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

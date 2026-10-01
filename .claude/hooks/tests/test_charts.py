@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import math
 import re
 import sys
@@ -11,6 +12,70 @@ if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
 from visual.charts import render_chart, _text_width_px
+
+
+def _tick_values(svg):
+    """Y-axis tick labels, bottom to top (they are emitted in ascending order)."""
+    texts = re.findall(
+        r'<text x="[\-0-9.]+" y="[\-0-9.]+" text-anchor="end" fill="var\(--ink-2\)" '
+        r'font-size="[0-9.]+">([\-0-9.]+)</text>',
+        svg,
+    )
+    return [float(t) for t in texts]
+
+
+def _bar_heights(svg):
+    """Heights of the data bars (legend swatches carry rx= and are skipped)."""
+    return [
+        float(h)
+        for h in re.findall(
+            r'<rect x="[\-0-9.]+" y="[\-0-9.]+" width="[\-0-9.]+" height="([\-0-9.]+)" fill=', svg
+        )
+    ]
+
+
+# Text boxes are estimated from the font size: the fallback chain the page
+# uses (Zen Kaku Gothic New ...) measured at most 1.02em above and 0.31em
+# below the baseline in Chromium, and 0.90-1.13x the estimated width, so the
+# estimate is taken slightly larger.
+_ASCENT_EM = 1.05
+_DESCENT_EM = 0.32
+_WIDTH_SLACK = 1.15
+
+
+def _text_box(x, y, lines, font_size, line_gap=0.0):
+    width = max(_text_width_px(line, font_size) for line in lines) * _WIDTH_SLACK
+    return (x - width / 2, y - _ASCENT_EM * font_size,
+            x + width / 2, y + _DESCENT_EM * font_size + line_gap * (len(lines) - 1))
+
+
+def _value_label_boxes(svg):
+    return [
+        _text_box(float(x), float(y), [html.unescape(t)], float(fs))
+        for x, y, fs, t in re.findall(
+            r'<text class="chart-value-label" x="([\-0-9.]+)" y="([\-0-9.]+)"[^>]*font-size="([0-9.]+)">([^<]*)</text>',
+            svg,
+        )
+    ]
+
+
+def _x_label_boxes(svg):
+    boxes = []
+    for x, y, inner in re.findall(
+        r'<text x="([\-0-9.]+)" y="([\-0-9.]+)" text-anchor="middle" fill="var\(--ink-2\)" font-size="11">(.*?)</text>',
+        svg,
+    ):
+        lines = re.findall(r"<tspan[^>]*>(.*?)</tspan>", inner) or [inner]
+        boxes.append(_text_box(float(x), float(y), [html.unescape(s) for s in lines], 11, line_gap=12))
+    return boxes
+
+
+def _boxes_overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _gridline_ys(svg):
+    return [float(y) for y in re.findall(r'<line x1="[\-0-9.]+" y1="([\-0-9.]+)" x2="[\-0-9.]+" y2="[\-0-9.]+" stroke="var\(--rule\)"', svg)]
 
 
 class ChartRenderTests(unittest.TestCase):
@@ -280,6 +345,123 @@ class ChartRenderTests(unittest.TestCase):
         svg = render_chart(spec)
         self.assertIn('transform="rotate(-30', svg)
         self.assertEqual(svg.count("<tspan"), 0)
+
+    # Value axis range -----------------------------------------------------
+    # Real-world regression (2026-09-29): an all-positive bar chart took the
+    # axis floor from the smallest value (1155 -> 1000), so the 1155 bar was
+    # drawn at about 1/10 of the 2501 bar when the real ratio is about 1/2.
+    _REPORTED_BAR = {
+        "kind": "bar",
+        "labels": ["ありがとう", "関数の動きを説明して", "頁を作って"],
+        "series": [
+            {"name": "直す前", "values": [2501, 2501, 3577]},
+            {"name": "直した後", "values": [1155, 1155, 3577]},
+        ],
+        "unit": "字",
+    }
+
+    def test_bar_axis_starts_at_zero_for_positive_values(self):
+        svg = render_chart(self._REPORTED_BAR)
+        ticks = _tick_values(svg)
+        self.assertEqual(ticks[0], 0.0)
+        self.assertGreaterEqual(ticks[-1], 3577)
+
+        # Bar length must be proportional to the value itself. Bars are
+        # emitted category by category, series by series: 2501, 1155, ...
+        heights = _bar_heights(svg)
+        self.assertEqual(len(heights), 6)
+        self.assertAlmostEqual(heights[1] / heights[0], 1155 / 2501, delta=0.01)
+        self.assertAlmostEqual(heights[0] / heights[4], 2501 / 3577, delta=0.01)
+
+    def test_bar_axis_includes_zero_for_negative_values(self):
+        spec = {
+            "kind": "bar",
+            "title": "減少のみ",
+            "labels": ["a", "b"],
+            "series": [{"name": "s", "values": [-5, -3]}],
+        }
+        ticks = _tick_values(render_chart(spec))
+        self.assertEqual(ticks[-1], 0.0)
+        self.assertLessEqual(ticks[0], -5)
+
+    def test_bar_axis_includes_zero_even_with_explicit_y_min(self):
+        # A caller-supplied floor above zero would truncate the bars the
+        # same way, so the zero rule wins for bars.
+        spec = {**self._REPORTED_BAR, "y_min": 1000}
+        self.assertEqual(_tick_values(render_chart(spec))[0], 0.0)
+
+    def test_all_zero_bar_axis_floor_is_zero(self):
+        spec = {
+            "kind": "bar",
+            "title": "全部ゼロ",
+            "labels": ["a", "b"],
+            "series": [{"name": "s", "values": [0, 0]}],
+        }
+        svg = render_chart(spec)
+        self.assertEqual(_tick_values(svg)[0], 0.0)
+        self.assertEqual(svg.count('class="chart-zero-mark"'), 2)
+
+    # Negative value labels ------------------------------------------------
+    # Real-world regression (2026-09-29): a negative bar that reaches the
+    # bottom of the axis put its value label (12px below the bar end) on top
+    # of the x-axis label, e.g. "-4億円" over "2024".
+    _NEGATIVE_CASES = {
+        "mixed": {
+            "kind": "bar", "title": "収支", "labels": ["2024", "2025", "2026"],
+            "series": [{"name": "収支", "values": [-4, 6, 2]}], "unit": "億円",
+        },
+        "negative_only": {
+            "kind": "bar", "title": "前年からの増減", "labels": ["A市", "B市", "C市"],
+            "series": [{"name": "増減", "values": [-10, -5, -8]}], "unit": "件",
+        },
+        "wrapped_labels": {
+            "kind": "bar", "title": "折り返す項目名",
+            "labels": ["長い項目名の" * 4, "b", "c"],
+            "series": [{"name": "今年", "values": [-20, 5, 12]}, {"name": "前年", "values": [-12, 8, -20]}],
+            "unit": "億円",
+        },
+    }
+
+    def test_negative_value_labels_stay_clear_of_x_labels(self):
+        for name, spec in self._NEGATIVE_CASES.items():
+            with self.subTest(name):
+                svg = render_chart(spec)
+                x_boxes = _x_label_boxes(svg)
+                self.assertEqual(len(x_boxes), len(spec["labels"]))
+                for value_box in _value_label_boxes(svg):
+                    for x_box in x_boxes:
+                        self.assertFalse(
+                            _boxes_overlap(value_box, x_box),
+                            "value label %r overlaps x label %r" % (value_box, x_box),
+                        )
+
+    def test_room_for_negative_labels_keeps_ticks_and_proportions(self):
+        # The fix only raises the plot's bottom edge: the axis keeps its
+        # ticks, and bar lengths stay proportional to the values.
+        svg = render_chart(self._NEGATIVE_CASES["mixed"])
+        self.assertEqual(_tick_values(svg), [-4.0, -2.0, 0.0, 2.0, 4.0, 6.0])
+        heights = _bar_heights(svg)
+        self.assertAlmostEqual(heights[0] / heights[1], 4 / 6, delta=0.01)
+        self.assertAlmostEqual(heights[2] / heights[1], 2 / 6, delta=0.01)
+
+    def test_no_room_is_reserved_when_labels_already_fit(self):
+        # Charts whose labels already fit keep the default plot bottom (312).
+        fits = {
+            "kind": "bar", "title": "減少のみ", "labels": ["A市", "B市", "C市"],
+            "series": [{"name": "増減", "values": [-12, -4, -7]}], "unit": "件",
+        }
+        positive = {**fits, "series": [{"name": "件数", "values": [12, 4, 7]}]}
+        for spec in (fits, positive):
+            with self.subTest(spec["series"][0]["values"]):
+                self.assertEqual(max(_gridline_ys(render_chart(spec))), 312.0)
+
+    def test_line_axis_still_fits_the_data(self):
+        # A line encodes change by position, not length, so it keeps
+        # auto-scaling to the data range (the floor stays at 1000 here).
+        spec = {**self._REPORTED_BAR, "kind": "line"}
+        ticks = _tick_values(render_chart(spec))
+        self.assertEqual(ticks[0], 1000.0)
+        self.assertEqual(ticks[-1], 4000.0)
 
 
 if __name__ == "__main__":

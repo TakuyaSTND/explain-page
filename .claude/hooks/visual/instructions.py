@@ -181,6 +181,24 @@ def compile_stop_reminder(
     return "\n".join(lines)
 
 
+# 2026-09-28（ユーザー承認＝「削る」）：頁を作らない回（Markdownで答える回）に出す、
+# 部品の書き方の短い版。html-output.md の版は頁（HTML）の作り方＝用語の包み方・根拠の表の
+# 列・判断の選択欄の部品・畳み方で、Markdownの回には使えない（実測＝auto の短い依頼で
+# 2,501字の指示文のうち約1,500字がこれと見た目の決まり）。値が None の部品は出さない。
+# ⚠️頁を作る回（local_html）は従来どおり html-output.md の版を出す＝always の
+#   このリポジトリでは1字も変わらない。
+INLINE_FRAGMENTS: dict[str, str | None] = {
+    "visual": "比較・関係・流れ・Before/Afterは、表や箇条書きで構造を見せ、読み方も文で説明する。",
+    "decision": "選択や承認を求めるときは、選択肢ごとに選ぶと何が変わるかと、推奨の有無と理由を添える。",
+    "evidence": (
+        "確認済み事実・実測・仮定・推奨・未検証を分けて書き、重要な断定には確かめた場所"
+        "（ファイル:行・コマンド・一次資料）を添える。"
+    ),
+    "glossary": "初出の専門語・略語・Project固有語は、やさしい言い換えの後に元の専門語を添える。",
+    "details": "長い記録や根拠は後ろにまとめ、理解に必要な説明は本文に残す。",
+}
+
+
 def compile_directive(
     plan: ExplanationPlan,
     path: str | Path,
@@ -190,6 +208,7 @@ def compile_directive(
 ) -> str:
     fragments = load_fragments(path)
     style_fragment = load_style_fragment(path)
+    is_page = str(plan.delivery).strip().lower() == "local_html"
     lines = [
         f"audience={plan.audience} depth={plan.depth}",
         "components=" + ",".join(plan.components),
@@ -199,7 +218,7 @@ def compile_directive(
         delivery_line(plan.publish_policy, plan.delivery),
     ]
     # ⚠️頁を作らないターンには出さない（Markdownで答えるだけのターンに雑音を足さない）。
-    if str(plan.delivery).strip().lower() == "local_html":
+    if is_page:
         lines.append(_renderer_line(render_page_path))
         # 2026-09-25：Codexだけに向けた1行。既存の「頁は手書きしない」の行の直後に置く
         # （指示文の前のほう＝実測で効く場所）。Claude・Hermesには出さない。
@@ -208,10 +227,14 @@ def compile_directive(
     # readability（B1/B2/B4/C2/C3/E7）は delivery を問わず常に出す＝
     # Markdownの地の文にも同じ書き方の規律をかける。
     lines.append(f"[readability] {READABILITY_BODY}")
-    if style_fragment:
+    # 見た目の決まりは頁の作り方＝頁を作らない回には出さない（2026-09-28）。
+    if style_fragment and is_page:
         lines.append("[visual_style] " + style_fragment)
     for component in plan.components:
-        fragment = fragments.get(component)
+        if not is_page and component in INLINE_FRAGMENTS:
+            fragment = INLINE_FRAGMENTS[component]
+        else:
+            fragment = fragments.get(component)
         if fragment:
             lines.append(f"[{component}] {fragment}")
     return "\n".join(lines)

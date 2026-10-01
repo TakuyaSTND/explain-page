@@ -48,7 +48,6 @@ PLUGIN_ROOT = os.path.join(REPO_ROOT, "plugins", branding.PRODUCT_NAME)
 MARKETPLACE_REL = ".claude-plugin/marketplace.json"
 
 PLUGIN_NAME = branding.PRODUCT_NAME
-PLUGIN_VERSION = "0.1.0"
 PLUGIN_DESCRIPTION = branding.PLUGIN_DESCRIPTION
 MARKETPLACE_NAME = branding.MARKETPLACE_NAME
 MARKETPLACE_OWNER = branding.AUTHOR_NAME
@@ -296,9 +295,13 @@ def _hooks_json_bytes():
 
 
 def _plugin_json_bytes():
+    # 2026-10-01（利用者の選択）：version を書かない。Claude Code は版の番号で更新を見分け、
+    #   manifest に番号があると、作者が変えるまで利用者はその写しのまま（公式の plugins/loading
+    #   「Versions and updates」）。番号が無ければ Git の置き場ではコミットの番号が版になり、
+    #   書き出して送るたびに届く＝番号の上げ忘れで黙って届かない事故が起きない。
+    #   ⚠️`claude plugin validate` は番号が無いと警告を出す（失敗ではない）。
     data = {
         "name": PLUGIN_NAME,
-        "version": PLUGIN_VERSION,
         "description": PLUGIN_DESCRIPTION,
         "author": {"name": MARKETPLACE_OWNER},
     }

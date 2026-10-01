@@ -72,6 +72,11 @@ def readability_rules_path(project_root: str | Path, script_root: str | Path) ->
     project_rules = claude_dir / "readability-rules.md"
     if project_rules.is_file():
         return project_rules
+    # 2026-09-28：利用者単位の配線（--shared）では台本の根が別のリポジトリの `.claude`
+    # なので、正本はその直下にある。プラグインの根には無いので、プラグインでは従来どおり雛形へ。
+    shared_rules = Path(script_root) / "readability-rules.md"
+    if shared_rules.is_file():
+        return shared_rules
     return Path(script_root) / "templates" / "readability-rules.md"
 
 
@@ -126,7 +131,12 @@ def artifact_root(value: str | None) -> Path:
     return Path(text)
 
 
-def render_page_tool_location(*, plugin: bool) -> str:
+def render_page_tool_location(
+    *,
+    plugin: bool,
+    script_root: str | Path | None = None,
+    project_root: str | Path | None = None,
+) -> str:
     """指示文で示す『頁を組む道具』の場所（LLMに見せる文字列）を返す。
 
     直置き（plugin=False）＝プロジェクト相対 `.claude/scripts/render_page.py`
@@ -134,7 +144,17 @@ def render_page_tool_location(*, plugin: bool) -> str:
     プラグイン（plugin=True）＝実ファイルパスではなく、実行時に展開される環境変数の
       トークンをそのまま埋め込む（`${CLAUDE_PLUGIN_ROOT}/scripts/render_page.py`）。
       ⚠️ここで実在のパスへ解決してしまうと、他人の機械では存在しないパスになる。
+    道具の置き場とプロジェクトが違う（2026-09-28）＝台本の根（script_root）の親が
+      プロジェクトの根と別の場所なら、道具の絶対の場所（`/` 区切り）を返す。
+      利用者単位の配線（--shared）や、別のリポジトリへ書いた Codex の配線では、
+      相対の場所はそのプロジェクトに存在しないので、LLM が道具を見つけられなくなる。
+      ⚠️両方を渡さない呼び出し・同じ場所のときは従来どおり（このリポジトリでは1バイトも変わらない）。
     """
     if plugin:
         return PLUGIN_ROOT_TOKEN + "/scripts/render_page.py"
+    if script_root is not None and project_root is not None:
+        tool_repo = os.path.normcase(os.path.abspath(str(Path(script_root).parent)))
+        project = os.path.normcase(os.path.abspath(str(project_root)))
+        if tool_repo != project:
+            return (Path(os.path.abspath(str(script_root))) / "scripts" / "render_page.py").as_posix()
     return DIRECT_RENDER_PAGE_PATH

@@ -541,7 +541,13 @@ def handle_event(
     # 2026-09-26（見やすさ V4）：依頼時の計画が残っていれば、書き方の決まりはその回の依頼時に
     # 出ている＝全文を繰り返さず、計画・直し方・後から増えた部品の書き方だけにする。
     # 依頼時の計画が無ければ（依頼時の指示が出ていない恐れ）従来どおり全文に倒す。
-    if saved_plan is not None:
+    # 2026-09-28：依頼時の計画が「頁を作らない」だった回も全文に倒す＝その回の依頼時には
+    #   頁用の書き方（見た目の決まり・用語の包み方など）を出していない（instructions.py の
+    #   INLINE_FRAGMENTS）。応答が長くなって頁が要ると分かった回に、書き方が届かなくなる。
+    saved_was_page = saved_plan is not None and (
+        str(_normalize_plan(saved_plan, policy).delivery).strip().lower() == "local_html"
+    )
+    if saved_was_page:
         reason = compile_stop_reminder(
             plan,
             tuple(saved_plan.components),

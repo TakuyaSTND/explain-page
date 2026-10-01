@@ -1,6 +1,5 @@
 {
   "name": "explain-page",
-  "version": "0.1.0",
   "description": "人に見せる頁（説明・報告・判断のHTML）を正規レンダラーで組んで検品まで通すフック一式。エージェントが書いた頁を、用語ホバー・図・根拠つきで検品する。",
   "author": {
     "name": "TakuyaSTND"

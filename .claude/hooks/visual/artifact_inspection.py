@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 
 from .glossary import GlossaryEntry
 from .render_components import DECISION_SCRIPT
+from .term_boundary import contains_term, find_term
 
 
 _VOID_TAGS = {
@@ -51,7 +52,6 @@ _EXCLUDED_VISIBLE_TAGS = {
 #   取りこぼしは穴にならない（列挙漏れが穴になる向きを、2026-09-01に逆にした）。
 _PROSE_TAGS = frozenset({"p", "li", "blockquote"})
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-_ASCII_WORD = re.compile(r"[A-Za-z0-9_]")
 
 
 @dataclass(frozen=True)
@@ -97,18 +97,14 @@ def _looks_like_identifier(value: str, known: set[str]) -> bool:
     )
 
 
-def _contains_term(text: str, term: str) -> bool:
-    start = 0
-    while True:
-        index = text.find(term, start)
-        if index < 0:
-            return False
-        before = text[index - 1] if index else ""
-        after_index = index + len(term)
-        after = text[after_index] if after_index < len(text) else ""
-        if not (_ASCII_WORD.fullmatch(before) or _ASCII_WORD.fullmatch(after)):
+def _occurs_within(text: str, term: str, start: int, end: int) -> bool:
+    """term が text[start:end] の中に語として現れるか（境目の判定には外側の文字も使う）。"""
+    position = find_term(text, term, start)
+    while 0 <= position < end:
+        if position + len(term) <= end:
             return True
-        start = index + 1
+        position = find_term(text, term, position + 1)
+    return False
 
 
 def _is_placeholder_source(value: str) -> bool:
@@ -159,6 +155,10 @@ class _ArtifactParser(HTMLParser):
         self.visible_text: list[str] = []
         self.evidence_rows: list[dict[str, object]] = []
         self.current_evidence: dict[str, object] | None = None
+        self.known_sorted = sorted(known_identifiers, key=lambda value: (-len(value), value))
+        # 包装の span をまたいだ「ひと続きの文」。(文字, 種類) の並び＝種類は
+        #   tooltip（包んだ語）・prose（本文の文字）・other（本文以外の文字）。
+        self.run: list[tuple[str, str]] = []
 
     def _inside(self, predicate) -> bool:
         return any(predicate(item) for item in self.stack)
@@ -168,12 +168,38 @@ class _ArtifactParser(HTMLParser):
             self.present_components.append(name)
 
     def _record_known_identifiers(self, text: str, *, wrapped: bool) -> None:
-        for term in sorted(self.known_identifiers, key=lambda value: (-len(value), value)):
-            if not _contains_term(text, term) or term in self.seen_identifiers:
+        for term in self.known_sorted:
+            if not contains_term(text, term) or term in self.seen_identifiers:
                 continue
             self.seen_identifiers.add(term)
             if not wrapped:
                 self.unwrapped_identifiers.append(term)
+
+    def _flush_run(self) -> None:
+        """ひと続きの文ごとに、用語の初出が包まれているかを調べる。
+
+        2026-09-29：レンダラーは包装の span を挟んだ1つの文として語の境目を判定する
+        （例＝「目盛り」の「盛り」を止める時は直前の「目」を見る）。検品器が span で
+        切った断片ごとに判定すると、包んだ語の隣の文字が見えず、レンダラーが止めた語を
+        「未包装」と責めうる。∴span を透明とみなし、他のタグで区切った同じ文で判定する。
+        """
+        pieces, self.run = self.run, []
+        if not pieces:
+            return
+        joined = "".join(text for text, _kind in pieces)
+        offset = 0
+        for text, kind in pieces:
+            end = offset + len(text)
+            if kind == "tooltip":
+                self._record_known_identifiers(text.strip(), wrapped=True)
+            elif kind == "prose":
+                for term in self.known_sorted:
+                    if term in self.seen_identifiers:
+                        continue
+                    if _occurs_within(joined, term, offset, end):
+                        self.seen_identifiers.add(term)
+                        self.unwrapped_identifiers.append(term)
+            offset = end
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = {key: (value or "") for key, value in attrs}
@@ -214,6 +240,8 @@ class _ArtifactParser(HTMLParser):
             ),
             "text": [],
         }
+        if not item["tooltip"]:
+            self._flush_run()
         self.stack.append(item)
 
         element_id = values.get("id", "").strip()
@@ -357,20 +385,25 @@ class _ArtifactParser(HTMLParser):
                 assert isinstance(source_text, list)
                 source_text.append(data)
 
+        inside_tooltip = self._inside(lambda item: bool(item.get("tooltip")))
         if not data.strip():
+            # 空白も境目の判定に使う文字なので、ひと続きの文には残す（包んだ語の文字は除く）。
+            if not inside_tooltip:
+                self.run.append((data, "other"))
             return
         if self._inside(lambda item: bool(item.get("hidden"))):
             return
         if self._inside(lambda item: item.get("tag") in _EXCLUDED_VISIBLE_TAGS):
             return
-        if self._inside(lambda item: bool(item.get("tooltip"))):
+        if inside_tooltip:
             return
         if self._inside(lambda item: item.get("tag") == "code"):
             return
         # ⚠️用語の包装を求めるのは**本文だけ**（2026-09-01のユーザー裁定）。
         #   ラベル・表の欄・色札・出所欄などは対象外＝取りこぼしても穴にならない側に倒す。
-        if self._inside(lambda item: item.get("tag") in _PROSE_TAGS):
-            self._record_known_identifiers(data, wrapped=False)
+        #   判定そのものは、ひと続きの文が閉じた時（_flush_run）にまとめて行う。
+        prose = self._inside(lambda item: item.get("tag") in _PROSE_TAGS)
+        self.run.append((data, "prose" if prose else "other"))
         self.visible_text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
@@ -386,12 +419,17 @@ class _ArtifactParser(HTMLParser):
             self.current_evidence = None
 
         if not self.stack:
+            self._flush_run()
             self.errors.append(f"mismatched closing tag </{tag}>")
             return
         if self.stack[-1].get("tag") == tag:
             item = self.stack.pop()
             self._record_closed_item(item)
+            # 包装の span の閉じは文を切らない（包んだ語も、ひと続きの文の一部）。
+            if not item.get("tooltip"):
+                self._flush_run()
             return
+        self._flush_run()
         tags = [str(item.get("tag")) for item in self.stack]
         if tag not in tags:
             self.errors.append(f"mismatched closing tag </{tag}>")
@@ -402,18 +440,22 @@ class _ArtifactParser(HTMLParser):
             self._record_closed_item(item)
             if item.get("tag") == tag:
                 break
+        self._flush_run()
 
     def _record_closed_item(self, item: dict[str, object]) -> None:
         if not item.get("tooltip"):
             return
         text = item.get("text")
         if isinstance(text, list):
-            normalized = "".join(str(part) for part in text).strip()
+            raw = "".join(str(part) for part in text)
+            normalized = raw.strip()
             if normalized:
                 self.wrapped_identifiers.add(normalized)
-                self._record_known_identifiers(normalized, wrapped=True)
+                # 初出の記録は文が閉じた時に、文の中の順番どおりに行う（_flush_run）。
+                self.run.append((raw, "tooltip"))
 
     def finish(self) -> None:
+        self._flush_run()
         remaining = [str(item.get("tag")) for item in self.stack if item.get("tag") not in _VOID_TAGS]
         if remaining:
             self.errors.append("unclosed tags: " + ", ".join(remaining))
