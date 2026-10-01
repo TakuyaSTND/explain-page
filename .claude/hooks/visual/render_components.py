@@ -37,6 +37,11 @@ try:
     from .images import embed_image
 except ImportError:
     embed_image = None  # type: ignore[assignment]
+# 2026-10-01（ユーザー承認の P2）：画面を撮って貼る撮影係。同じ流儀＝遅延import＋守り付き。
+try:
+    from .screenshots import capture as capture_screenshot
+except ImportError:
+    capture_screenshot = None  # type: ignore[assignment]
 
 try:
     from .visuals import (
@@ -379,10 +384,19 @@ def _render_inline(
                 output.append(
                     _escape_with_tooltips(text[plain_start:position], entries, seen)
                 )
-                output.append(
-                    '<span class="badge b-%s">%s</span>'
-                    % (_badge_tone(tone), escape(label.strip()))
-                )
+                if tone.strip().lower() == "pin":
+                    # 2026-10-01（ユーザー承認の P3）：[[pin:3]] / [[pin:3:good]]＝画像の点の印
+                    # （marks の style "pin"）と同じ見た目の番号。表の行頭に置いて画像とつなぐ。
+                    number, _, pin_tone = label.partition(":")
+                    output.append(
+                        '<span class="pin" data-tone="%s">%s</span>'
+                        % (_badge_tone(pin_tone or "acc"), escape(number.strip()))
+                    )
+                else:
+                    output.append(
+                        '<span class="badge b-%s">%s</span>'
+                        % (_badge_tone(tone), escape(label.strip()))
+                    )
                 position = end + 2
                 plain_start = position
                 continue
@@ -1604,6 +1618,96 @@ def _formula_block(
     return '<div class="formula">' + body + _copy_button(tex) + reading_html + "</div>"
 
 
+# 2026-10-01（ユーザー承認の P4・P5）：表のセルの積み上げ棒と薄い分母。
+# 積み上げ棒の既定の色の順＝良い・注意・悪い（4つ目からは中立の色）。
+STACK_DEFAULT_TONES = ("good", "warn", "bad")
+TONE_NAMES = {"good": "良い", "warn": "注意", "bad": "悪い", "acc": "そのほか", "new": "新しい"}
+_FRACTION = re.compile(r"^\s*([0-9][0-9,.]*)\s*/\s*([0-9][0-9,.]*)(.*)$")
+
+
+def _int_list(value: object) -> list[int]:
+    """列や行の番号の一覧を受ける（数でない物は捨てる）。"""
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else [value]
+    numbers = []
+    for item in items:
+        try:
+            numbers.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return numbers
+
+
+def _stack_values(text: str) -> list[tuple[str, float]] | None:
+    """「62,3,0」（読点も可）を内訳の数の並びにする。2つ以上の0以上の数でなければ None。"""
+    parts = [p.strip() for p in re.split(r"[,、]", text.strip()) if p.strip()]
+    if len(parts) < 2:
+        return None
+    values = []
+    for part in parts:
+        try:
+            number = float(part)
+        except ValueError:
+            return None
+        if number < 0:
+            return None
+        values.append((part, number))
+    return values
+
+
+def _stack_tone(index: int, tones: Sequence[str]) -> str:
+    if index < len(tones) and tones[index]:
+        return tones[index]
+    return STACK_DEFAULT_TONES[index] if index < len(STACK_DEFAULT_TONES) else "acc"
+
+
+def _stack_label(index: int, labels: Sequence[str], tone: str) -> str:
+    if index < len(labels) and labels[index]:
+        return labels[index]
+    return TONE_NAMES.get(tone, "区分%d" % (index + 1))
+
+
+def _stack_html(
+    values: Sequence[tuple[str, float]], labels: Sequence[str], tones: Sequence[str]
+) -> str:
+    """積み上げ棒のセル＝「1つ目/合計」の数と、内訳の割合で色分けした1本の棒。"""
+    total = sum(number for _, number in values)
+    total_text = (
+        str(int(total)) if all(float(n).is_integer() for _, n in values) else ("%g" % total)
+    )
+    segments = []
+    spoken = []
+    for index, (shown, number) in enumerate(values):
+        tone = _stack_tone(index, tones)
+        label = _stack_label(index, labels, tone)
+        spoken.append("%s %s" % (label, shown))
+        if number > 0:
+            segments.append(
+                '<i data-tone="%s" style="flex-grow:%g" title="%s"></i>'
+                % (escape(tone, quote=True), number, escape("%s %s" % (label, shown), quote=True))
+            )
+    return (
+        '<span class="v">' + escape(values[0][0])
+        + '<span class="of">/' + escape(total_text) + "</span></span>"
+        + '<span class="stack" role="img" aria-label="%s">%s</span>'
+        % (escape("・".join(spoken), quote=True), "".join(segments))
+    )
+
+
+def _stack_legend(labels: Sequence[str], tones: Sequence[str]) -> str:
+    """積み上げ棒の色の凡例（表の上に1行）。"""
+    count = max(len(labels), len(tones)) or len(STACK_DEFAULT_TONES)
+    items = []
+    for index in range(count):
+        tone = _stack_tone(index, tones)
+        items.append(
+            '<span><i data-tone="%s"></i>%s</span>'
+            % (escape(tone, quote=True), escape(_stack_label(index, labels, tone)))
+        )
+    return '<div class="stack-legend" aria-label="色の意味">' + "".join(items) + "</div>"
+
+
 def _table_block(
     value: object,
     glossary_entries: Mapping[str, GlossaryEntry],
@@ -1635,6 +1739,14 @@ def _one_table(
     body: list[list[str]] = []
     heat_cols: list[int] = []
     bar_cols: list[int] = []
+    # 2026-10-01（ユーザー承認の P4・P5・P6）：積み上げ棒の列・薄い分母の列・行の区切り・
+    # 行見出し。どれも指定が無ければ今までと同じ表になる。
+    stack_cols: list[int] = []
+    frac_cols: list[int] = []
+    group_rows: set[int] = set()
+    row_head = False
+    stack_labels: list[str] = []
+    stack_tones: list[str] = []
     if isinstance(value, Mapping):
         caption = _stringify(value.get("caption", ""))
         heading = _stringify(value.get("heading", ""))
@@ -1653,6 +1765,12 @@ def _one_table(
                 bar_cols.append(int(raw_index))
             except (TypeError, ValueError):
                 continue
+        stack_cols = _int_list(value.get("stack"))
+        frac_cols = _int_list(value.get("frac"))
+        group_rows = set(_int_list(value.get("groups")))
+        row_head = _truthy(value.get("row_head"))
+        stack_labels = [_stringify(x) for x in (value.get("stack_labels") or [])]
+        stack_tones = [_badge_tone(_stringify(x)) for x in (value.get("stack_tones") or [])]
     else:
         for raw_line in str(value or "").splitlines():
             line = raw_line.strip()
@@ -1685,21 +1803,32 @@ def _one_table(
         numeric_values = [
             v
             for v in (
-                _numeric_value(row[col]) if col < len(row) else None for row in body
+                _numeric_value(row[col].partition(NEWLINE)[0]) if col < len(row) else None
+                for row in body
             )
             if v is not None
         ]
         if numeric_values:
             col_stats[col] = (min(numeric_values), max(numeric_values))
     rows_html = []
-    for row in body:
+    used_stack = False
+    for row_index, row in enumerate(body):
         padded = row + [""] * (width - len(row))
         cell_parts = []
         for index, cell in enumerate(padded):
             style_bits: list[str] = []
             extra_html = ""
+            # 2026-10-01（P5）：セルの1行目が本体、改行の後は小さい注記（cell-note）。
+            first, newline, rest = cell.partition(NEWLINE)
+            note_html = (
+                '<span class="cell-note">'
+                + _inline_with_breaks(rest, glossary_entries, seen_terms)
+                + "</span>"
+                if newline and rest.strip()
+                else ""
+            )
             stats = col_stats.get(index)
-            numeric = _numeric_value(cell)
+            numeric = _numeric_value(first)
             if index in heat_cols and stats and numeric is not None and heat_color is not None:
                 lo, hi = stats
                 style_bits.append("background:" + heat_color(numeric, lo, hi))
@@ -1711,18 +1840,44 @@ def _one_table(
                     '<span class="cell-bar"><span class="cell-bar-fill" '
                     'style="width:%.1f%%"></span></span>' % (frac * 100)
                 )
+            stack_values = _stack_values(first) if index in stack_cols else None
+            classes: list[str] = []
+            if stack_values is not None:
+                used_stack = True
+                main_html = _stack_html(stack_values, stack_labels, stack_tones)
+                classes.append("stackcell")
+            elif index in frac_cols and _FRACTION.match(first):
+                match = _FRACTION.match(first)
+                main_html = (
+                    '<span class="v">' + escape(match.group(1))
+                    + '<span class="of">/' + escape(match.group(2)) + "</span></span>"
+                    + _render_inline(match.group(3), glossary_entries, seen_terms)
+                )
+                classes.append("num")
+            else:
+                main_html = _render_inline(first, glossary_entries, seen_terms)
+                if _is_numeric(first):
+                    classes.append("num")
             style_attr = ' style="%s"' % ";".join(style_bits) if style_bits else ""
+            # 2026-10-01（P6）：行見出し＝1列目を th（scope=row）にして太くする。
+            tag = "th" if row_head and index == 0 else "td"
+            scope = ' scope="row"' if tag == "th" else ""
             cell_parts.append(
-                '<td data-label="%s"%s%s>%s%s</td>'
+                '<%s%s data-label="%s"%s%s>%s%s%s</%s>'
                 % (
+                    tag,
+                    scope,
                     escape(head[index], quote=True),
-                    ' class="num"' if _is_numeric(cell) else "",
+                    ' class="%s"' % " ".join(classes) if classes else "",
                     style_attr,
-                    _inline_with_breaks(cell, glossary_entries, seen_terms),
+                    main_html,
                     extra_html,
+                    note_html,
+                    tag,
                 )
             )
-        rows_html.append("<tr>" + "".join(cell_parts) + "</tr>")
+        row_class = ' class="grp"' if row_index in group_rows and row_index > 0 else ""
+        rows_html.append("<tr%s>" % row_class + "".join(cell_parts) + "</tr>")
     caption_html = (
         f"<caption>{_render_inline(caption, glossary_entries, seen_terms)}</caption>"
         if caption
@@ -1733,8 +1888,10 @@ def _one_table(
         if heading
         else ""
     )
+    legend_html = _stack_legend(stack_labels, stack_tones) if used_stack else ""
     return (
         heading_html
+        + legend_html
         + '<div class="scroll"><table>'
         + caption_html
         + f"<thead><tr>{header_cells}</tr></thead>"
@@ -2469,6 +2626,112 @@ def _tiles_block(
     return '<div class="tiles">' + "".join(tiles) + "</div>" if tiles else ""
 
 
+def _stats_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """大きい数字のタイル（2026-10-01・ユーザー承認の P7）。
+
+    入れるもの＝`{"value","unit","label","text","tone"}` の一覧。返るもの＝大きい等幅の数字
+    （単位は小さく）・名札・補足の並び。⚠️頁の頭の「主要な数字」に使う。多用しない。
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    tiles = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            item = {"value": _stringify(item)}
+        tone = _badge_tone(_stringify(item.get("tone", "")))
+        number = _stringify(item.get("value", ""))
+        unit = _stringify(item.get("unit", ""))
+        label = _stringify(item.get("label", ""))
+        text = _stringify(item.get("text", ""))
+        tiles.append(
+            '<div class="stat" data-tone="%s"><div class="stat-num">%s%s</div>%s%s</div>'
+            % (
+                escape(tone, quote=True),
+                escape(number),
+                "<small>" + escape(unit) + "</small>" if unit else "",
+                '<div class="stat-label">' + _render_inline(label, glossary_entries, seen_terms) + "</div>"
+                if label
+                else "",
+                '<p class="stat-sub">' + _inline_with_breaks(text, glossary_entries, seen_terms) + "</p>"
+                if text
+                else "",
+            )
+        )
+    return '<div class="stats">' + "".join(tiles) + "</div>" if tiles else ""
+
+
+def _hsteps_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """横に並ぶ番号つきの手順（2026-10-01・ユーザー承認の P9）。狭い画面では折り返す。
+
+    入れるもの＝`{"title","text"}` か「題：本文」の文字列の一覧。
+    """
+    items = value if isinstance(value, (list, tuple)) else str(value or "").splitlines()
+    rows = []
+    for item in items:
+        if isinstance(item, Mapping):
+            title = _stringify(item.get("title", ""))
+            text = _stringify(item.get("text", ""))
+        else:
+            line = _stringify(item).strip()
+            if not line:
+                continue
+            title, separator, text = line.partition("：")
+            if not separator:
+                title, text = line, ""
+        rows.append(
+            "<li><b>" + _render_inline(title, glossary_entries, seen_terms) + "</b>"
+            + ("<span>" + _inline_with_breaks(text, glossary_entries, seen_terms) + "</span>" if text else "")
+            + "</li>"
+        )
+    return '<ol class="hsteps">' + "".join(rows) + "</ol>" if rows else ""
+
+
+def _chips_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """短い語の札の束（2026-10-01・ユーザー承認の P9）。
+
+    入れるもの＝語の一覧か、`{"title","items","note"}` の群の一覧。群の数は自動で数える。
+    """
+    groups = value if isinstance(value, (list, tuple)) else [value]
+    if groups and not any(isinstance(g, Mapping) for g in groups):
+        groups = [{"items": list(groups)}]
+    blocks = []
+    for group in groups:
+        if not isinstance(group, Mapping):
+            continue
+        words = [
+            _stringify(w).strip() for w in (group.get("items") or []) if _stringify(w).strip()
+        ]
+        if not words:
+            continue
+        title = _stringify(group.get("title", ""))
+        note = _stringify(group.get("note", ""))
+        head = ""
+        if title:
+            head = (
+                '<h4 class="chip-head">' + _render_inline(title, glossary_entries, seen_terms)
+                + '<span class="cnt">%d</span>' % len(words)
+                + ('<span class="cnt-note">' + escape(note) + "</span>" if note else "")
+                + "</h4>"
+            )
+        blocks.append(
+            '<div class="chip-group">' + head + '<ul class="chips">'
+            + "".join("<li>" + _render_inline(w, glossary_entries, seen_terms) + "</li>" for w in words)
+            + "</ul></div>"
+        )
+    return '<div class="chip-groups">' + "".join(blocks) + "</div>" if blocks else ""
+
+
 def _ensure_xlink_namespace(text: str) -> str:
     """`xlink:` を使うのに宣言が無いSVGへ、解析のためだけに宣言を補う。
 
@@ -2562,6 +2825,71 @@ def _image_block(
         _IMAGE_EVIDENCE_LINES.append(result.source_line)
         if not _PAGE_HAS_EVIDENCE_SECTION:
             html += '<p class="cap img-src">' + escape(result.source_line) + "</p>"
+    return html
+
+
+# 頁の文字に http:// や file:// が残ると、検品（receipts.py の外部 URL の判定）が落とす。
+_SCHEME = re.compile(r"(?i)\b(?:https?|file):/{2,3}")
+
+
+def _screenshot_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """画面を撮って貼る（2026-10-01・ユーザー承認の P2）。
+
+    入れるもの＝`{"target"（手元のファイルか localhost などの URL）,"viewport":[幅,高さ],
+    "selector","full_page","wait_ms","crop","marks","caption","source","alt","width","num"}`。
+    撮影は `visual/screenshots.py`、貼るのは image と同じ `embed_image`（縮小・圧縮）。
+    根拠欄には「撮った先・幅・撮った時刻・ハッシュ」の1行が自動で足される。
+    ⚠️外部の頁は撮らない（撮影係が断る）＝情報の持ち出しとログイン中の画面の写り込みを防ぐ。
+    """
+    import datetime
+    import os
+    import tempfile
+
+    if capture_screenshot is None or embed_image is None:
+        return '<div class="note warn"><p>画面の撮影は今使えない。</p></div>'
+    spec = value if isinstance(value, Mapping) else {"target": _stringify(value)}
+    shot = capture_screenshot(spec)
+    if shot.png is None:
+        return (
+            '<div class="note warn"><p>画面を撮れなかった：'
+            + escape(_SCHEME.sub("", "、".join(shot.warnings)) or "理由不明")
+            + "</p></div>"
+        )
+    handle, temp_path = tempfile.mkstemp(prefix="shot-embed-", suffix=".png")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(shot.png)
+        embed_spec = {
+            key: spec[key]
+            for key in ("crop", "marks", "caption", "alt", "width", "num")
+            if key in spec
+        }
+        embed_spec["path"] = temp_path
+        embed_spec["source"] = spec.get("source") or ("画面の写真：" + shot.label)
+        result = embed_image(embed_spec)
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+    if not result.html:
+        return (
+            '<div class="note warn"><p>撮った画面を貼れなかった：'
+            + escape(_SCHEME.sub("", "、".join(result.warnings)) or "理由不明")
+            + "</p></div>"
+        )
+    html = _add_zoom_attribute(result.html)
+    stamp = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+    line = "実測：画面の写真＝%s・%s｜%s（撮影 %s）" % (
+        shot.label, result.sha256[:12], shot.place or shot.label, stamp
+    )
+    _IMAGE_EVIDENCE_LINES.append(line)
+    if not _PAGE_HAS_EVIDENCE_SECTION:
+        html += '<p class="cap img-src">' + escape(line) + "</p>"
     return html
 
 
@@ -2700,6 +3028,13 @@ def _details_body(
         parts.append(_cards_block(item["cards"], glossary_entries, seen_terms))
     if item.get("tiles"):
         parts.append(_tiles_block(item["tiles"], glossary_entries, seen_terms))
+    # 2026-10-01（ユーザー承認の P7・P9）：大きい数字・横並びの手順・語の札の束。
+    if item.get("stats"):
+        parts.append(_stats_block(item["stats"], glossary_entries, seen_terms))
+    if item.get("steps"):
+        parts.append(_hsteps_block(item["steps"], glossary_entries, seen_terms))
+    if item.get("chips"):
+        parts.append(_chips_block(item["chips"], glossary_entries, seen_terms))
     if item.get("columns"):
         parts.append(_columns_block(item["columns"], glossary_entries, seen_terms))
     if item.get("ordered"):
@@ -2734,6 +3069,8 @@ def _details_body(
         parts.append(_svg_block(item["svg"], glossary_entries, seen_terms))
     if item.get("image"):
         parts.append(_image_block(item["image"], glossary_entries, seen_terms))
+    if item.get("screenshot"):
+        parts.append(_screenshot_block(item["screenshot"], glossary_entries, seen_terms))
     if item.get("timeline"):
         parts.append(_figure_svg_block(timeline_svg, item["timeline"], glossary_entries, seen_terms))
     if item.get("quadrant"):
@@ -3377,6 +3714,12 @@ def render_components(
             break
     header_component = ' data-component="overview"' if overview_present else ""
     lede = f'<p class="lede">{overview}</p>' if overview_present else ""
+    # 2026-10-01（ユーザー承認の P9）：結論の見出し。headline があれば h1 を結論の1文にし、
+    # 短い題は見出しの上の小さい行へ回す（<title> と頁の一覧の名前は短い題のまま）。
+    # ⚠️用語の説明は付けない＝本文の初出の包装（p・li の検品）とぶつけないため。
+    headline = _stringify(content.get("headline", "")).strip()
+    eyebrow_html = escape(title) if headline else "UNDERSTANDING COMPOSER / PROJECT NOVICE"
+    h1_html = escape(headline) if headline else escape(title)
     # 2026-08-30（ユーザー裁定）：頁全体の2段組み。側柱があるときだけ2段になる。
     # 2026-09-08（③）：側柱の用語リストは本文の後でないと数えられない
     #   （seen_terms が確定してから、本文で2回以上現れた語だけを選ぶ）。
@@ -3449,12 +3792,13 @@ pre.log.diff{{padding:.7rem 0}}pre.log.diff span{{display:block;padding:0 1rem}}
 .img-figure{{margin:0;display:flex;flex-direction:column;gap:.4rem;min-width:0}}.img-frame{{position:relative;overflow:hidden;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);line-height:0}}.img-frame img{{display:block;width:100%;height:auto}}.img-frame[data-zoom]{{cursor:zoom-in}}.img-figure figcaption{{font-size:.8rem;color:var(--ink-3)}}.marks{{position:absolute;inset:0;width:100%;height:100%}}.cap.img-src{{margin-top:.2rem}}
 .zoom-overlay{{position:fixed;inset:0;background:color-mix(in srgb,#000 82%,transparent);display:flex;align-items:center;justify-content:center;z-index:999;padding:2rem;cursor:zoom-out}}.zoom-overlay .img-frame{{cursor:zoom-out;max-width:min(92vw,1100px);max-height:92vh;border-color:var(--surface)}}.zoom-overlay img{{max-height:88vh;width:auto;max-width:100%}}
 .cell-bar{{display:inline-block;width:3.4rem;height:.5rem;margin-left:.5rem;background:var(--surface-2);border:1px solid var(--rule);border-radius:2px;overflow:hidden;vertical-align:middle}}.cell-bar-fill{{display:block;height:100%;background:var(--accent)}}
+.pin{{display:inline-grid;place-items:center;min-width:1.35rem;height:1.35rem;padding:0 .3rem;border-radius:999px;background:var(--accent);color:var(--on-accent);font:700 .72rem/1 "IBM Plex Mono",ui-monospace,monospace;vertical-align:.08em;margin-right:.35rem}}.pin[data-tone="good"]{{background:var(--pass)}}.pin[data-tone="warn"]{{background:var(--warn)}}.pin[data-tone="bad"]{{background:var(--fail)}}.pin[data-tone="new"]{{background:var(--new)}}.pin[data-tone="acc"]{{background:var(--accent)}}.of{{color:var(--ink-3)}}td.stackcell{{min-width:7.5rem}}td.stackcell .v{{display:block;font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}}.stack{{display:flex;gap:2px;height:.5rem;width:7.5rem;max-width:100%;margin-top:.3rem;border-radius:2px;overflow:hidden;background:var(--surface-2)}}.stack i{{display:block;height:100%;min-width:3px}}.stack i[data-tone="good"],.stack-legend i[data-tone="good"]{{background:var(--pass)}}.stack i[data-tone="warn"],.stack-legend i[data-tone="warn"]{{background:var(--warn)}}.stack i[data-tone="bad"],.stack-legend i[data-tone="bad"]{{background:var(--fail)}}.stack i[data-tone="new"],.stack-legend i[data-tone="new"]{{background:var(--new)}}.stack i[data-tone="acc"],.stack-legend i[data-tone="acc"]{{background:var(--accent)}}.stack-legend{{display:flex;flex-wrap:wrap;gap:.3rem 1rem;font-size:.8rem;color:var(--ink-2);margin:.1rem 0 .45rem}}.stack-legend span{{display:inline-flex;align-items:center;gap:.35rem}}.stack-legend i{{display:inline-block;width:.7rem;height:.7rem;border-radius:2px}}.cell-note{{display:block;margin-top:.15rem;font-family:inherit;font-size:.76rem;line-height:1.55;color:var(--ink-3);white-space:normal;text-align:left}}td.num .cell-note{{font-family:"Zen Kaku Gothic New",system-ui,sans-serif}}tr.grp td,tr.grp th{{border-top:2px solid var(--rule)}}tbody th[scope="row"]{{font-weight:700;color:var(--ink);background:transparent}}tbody th[scope="row"]{{min-width:6.5rem}}@media(max-width:600px){{td.stackcell{{min-width:5.6rem}}.stack{{width:5.6rem}}}}.img-pin{{position:absolute;transform:translate(-50%,-50%);display:inline-grid;place-items:center;min-width:1.5rem;height:1.5rem;padding:0 .3rem;border-radius:999px;font:700 .76rem/1 "IBM Plex Mono",ui-monospace,monospace;background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 2px var(--surface);pointer-events:none}}.img-pin[data-tone="good"]{{background:var(--pass)}}.img-pin[data-tone="warn"]{{background:var(--warn)}}.img-pin[data-tone="bad"]{{background:var(--fail)}}.img-pin[data-style="box"]{{transform:translate(-35%,-35%);background:var(--surface);color:var(--fail);border:1.5px solid var(--fail);box-shadow:none}}.img-pin[data-style="box"][data-tone="good"]{{color:var(--pass);border-color:var(--pass)}}.img-pin[data-style="box"][data-tone="warn"]{{color:var(--warn);border-color:var(--warn)}}.img-pin[data-style="box"][data-tone="acc"]{{color:var(--accent);border-color:var(--accent)}}.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:.7rem;min-width:0}}.stat{{background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:.9rem 1rem;display:flex;flex-direction:column;gap:.25rem;min-width:0}}.stat-num{{font:500 2rem/1.15 "IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--ink);overflow-wrap:anywhere}}.stat-num small{{font:500 .85rem/1 "Zen Kaku Gothic New",system-ui,sans-serif;color:var(--ink-2);margin-left:.35rem}}.stat-label{{font-weight:700;font-size:.9rem}}.stat-sub{{margin:0;font-size:.83rem;line-height:1.7;color:var(--ink-2)}}.stat[data-tone="good"]{{border-top-color:var(--pass)}}.stat[data-tone="warn"]{{border-top-color:var(--warn)}}.stat[data-tone="bad"]{{border-top-color:var(--fail)}}.stat[data-tone="new"]{{border-top-color:var(--new)}}ol.hsteps{{list-style:none;margin:0;padding:0;counter-reset:hs;display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:1rem;min-width:0}}ol.hsteps li{{counter-increment:hs;display:flex;flex-direction:column;gap:.25rem;border-top:2px solid var(--accent);padding-top:.55rem;min-width:0}}ol.hsteps li::before{{content:counter(hs);font:600 .78rem/1 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent)}}ol.hsteps b{{font-size:.93rem}}ol.hsteps span{{font-size:.86rem;line-height:1.7;color:var(--ink-2)}}.chip-groups{{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.9rem 1.4rem;min-width:0}}.chip-group{{display:flex;flex-direction:column;gap:.45rem;min-width:0}}.chip-head{{margin:0;font-size:.88rem;display:flex;align-items:baseline;gap:.45rem;flex-wrap:wrap}}.chip-head .cnt{{font:600 .8rem/1 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent)}}.cnt-note{{font-size:.76rem;font-weight:400;color:var(--ink-3)}}ul.chips{{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.35rem}}ul.chips li{{font-size:.8rem;line-height:1.5;padding:.12rem .55rem;border:1px solid var(--rule);border-radius:999px;background:var(--surface);color:var(--ink-2)}}
 .callout-legend{{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.45rem}}.callout-item{{display:flex;align-items:center;gap:.55rem}}.callout-legend svg.badge{{width:1.4rem;height:1.4rem;padding:0;border:0;background:none;display:inline-block;vertical-align:middle;flex:none}}.callout-text{{font-size:.88rem;color:var(--ink-2)}}
 .compare{{border:1px solid var(--rule);border-radius:2px;padding:1rem;background:var(--surface);min-width:0}}.compare-tabs label{{min-height:32px;display:inline-flex;align-items:center}}
 @media print{{@page{{size:A4;margin:15mm}}#theme-toggle,.copy-btn,#copy-decision{{display:none !important}}.wrap[data-layout="rail"]{{display:block}}.wrap[data-layout="rail"]>.rail{{order:0;position:static;max-height:none;overflow:visible}}.card,.scroll,pre,.dia-wrap,.chart-wrap,details,.img-figure,.compare,.callout-legend{{break-inside:avoid;page-break-inside:avoid}}.t::after{{display:none !important}}.zoom-overlay,.dia-node-tip,.dia-hover-hint{{display:none !important}}}}
 </style>
 </head>
-<body><div class="wrap"{layout_attr}><header{header_component}><div class="head-row"><p class="eyebrow">UNDERSTANDING COMPOSER / PROJECT NOVICE</p><button id="theme-toggle" type="button">明暗を切り替える</button></div><h1>{escape(title)}</h1>{lede}</header>{flow_open}{''.join(sections)}{flow_close}{rail_html}{provenance}</div>
+<body><div class="wrap"{layout_attr}><header{header_component}><div class="head-row"><p class="eyebrow">{eyebrow_html}</p><button id="theme-toggle" type="button">明暗を切り替える</button></div><h1>{h1_html}</h1>{lede}</header>{flow_open}{''.join(sections)}{flow_close}{rail_html}{provenance}</div>
 <script>
 {DECISION_SCRIPT}
 </script></body></html>"""

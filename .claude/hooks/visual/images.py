@@ -214,10 +214,41 @@ def _encode_best(img: "Image.Image", max_bytes: int) -> Tuple[bytes, str, List[s
 # --------------------------------------------------------------------------
 
 
+# 2026-10-01（ユーザー承認の P3）：印の色。⚠️既定は従来どおり＝枠は「悪い」の赤、
+# 点の印（pin）は中立の色（表の行頭の [[pin:N]] と同じ見た目にそろえる）。
+MARK_TONES = {
+    "bad": "var(--fail)", "fail": "var(--fail)", "ng": "var(--fail)",
+    "good": "var(--pass)", "ok": "var(--pass)",
+    "warn": "var(--warn)",
+    "acc": "var(--accent)", "accent": "var(--accent)", "neutral": "var(--accent)", "info": "var(--accent)",
+}
+
+
+# 印の色の名前を、番号の丸（HTML）の data-tone へ直す。
+MARK_TONE_KEYS = {
+    "bad": "bad", "fail": "bad", "ng": "bad",
+    "good": "good", "ok": "good",
+    "warn": "warn",
+    "acc": "acc", "accent": "acc", "neutral": "acc", "info": "acc",
+}
+
+
 def _render_marks_svg(
     marks: Sequence[Any], width: int, height: int, scale: float
 ) -> str:
-    parts: List[str] = []
+    """画像の上の印を描く（枠は SVG、番号は HTML の丸）。
+
+    入れるもの＝`{"x","y","w","h","label","tone","style"}` の一覧（座標は元の画像の画素）。
+      style＝"box"（既定・枠＋角の番号）か "pin"（枠なし・その点に塗りの番号）。
+      tone＝bad（枠の既定）／acc（点の既定）／good／warn。
+    2026-10-01（ユーザー承認の P3）：番号を SVG の字から、割合の位置に置く HTML の丸に変えた。
+      実測＝SVG の字は画像と一緒に縮むので、幅870pxの写真を390pxの画面で見ると番号の丸が
+      半径約5pxまで小さくなった。HTML の丸は画面の幅によらず同じ大きさで、表の行頭の
+      [[pin:N]] と同じ見た目になる。枠（rect）は画像に合わせて縮むほうが正しいので SVG のまま。
+    """
+    rects: List[str] = []
+    pins: List[str] = []
+    stroke = max(2.0, width * 0.0032)
     for i, m in enumerate(marks, start=1):
         if not isinstance(m, Mapping):
             continue
@@ -228,24 +259,33 @@ def _render_marks_svg(
             h = float(m.get("h", 0)) * scale
         except (TypeError, ValueError):
             continue
-        parts.append(
-            '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="none" '
-            'stroke="var(--fail)" stroke-width="2"></rect>' % (x, y, w, h)
-        )
+        style = str(m.get("style", "box") or "box").strip().lower()
+        is_pin = style == "pin"
+        tone_name = str(m.get("tone", "acc" if is_pin else "bad") or "").strip().lower()
+        tone_key = MARK_TONE_KEYS.get(tone_name, "acc" if is_pin else "bad")
+        color = MARK_TONES.get(tone_key, "var(--fail)")
         label = m.get("label")
         label_text = escape(str(label), quote=True) if label not in (None, "") else str(i)
-        parts.append(
-            '<circle cx="%.1f" cy="%.1f" r="9" fill="#ffffff" stroke="var(--fail)" '
-            'stroke-width="1.5"></circle>' % (x, y)
+        if not is_pin:
+            rects.append(
+                '<rect x="%.1f" y="%.1f" width="%.1f" height="%.1f" fill="none" '
+                'stroke="%s" stroke-width="%.1f"></rect>' % (x, y, w, h, color, stroke)
+            )
+        left = (x / width * 100.0) if width else 0.0
+        top = (y / height * 100.0) if height else 0.0
+        pins.append(
+            '<span class="img-pin" data-style="%s" data-tone="%s" '
+            'style="left:clamp(.75rem,%.2f%%,calc(100%% - .75rem));top:clamp(.75rem,%.2f%%,calc(100%% - .75rem))">%s</span>'
+            % ("pin" if is_pin else "box", tone_key, left, top, label_text)
         )
-        parts.append(
-            '<text x="%.1f" y="%.1f" text-anchor="middle" dominant-baseline="central" '
-            'font-size="10" font-weight="700" fill="var(--fail)">%s</text>'
-            % (x, y + 0.5, label_text)
-        )
-    if not parts:
+    if not rects and not pins:
         return ""
-    return '<svg class="marks" viewBox="0 0 %d %d">%s</svg>' % (width, height, "".join(parts))
+    svg = (
+        '<svg class="marks" viewBox="0 0 %d %d">%s</svg>' % (width, height, "".join(rects))
+        if rects
+        else ""
+    )
+    return svg + "".join(pins)
 
 
 def _build_figure_html(
@@ -466,6 +506,11 @@ def embed_image(
                 max_display_width = int(width_spec)
             except (TypeError, ValueError):
                 warnings.append("invalid width (display cap), ignoring: %r" % (width_spec,))
+        # 2026-10-01（ユーザー承認の P1）：小さい画像を列の幅まで引き伸ばさない。
+        #   実測＝幅434pxの写真が約765pxに引き伸ばされてぼやけた。∴既定の表示の上限は
+        #   埋め込む画像の幅（大きい画像は今までどおり列の幅に収まる）。
+        if max_display_width is None and final_w:
+            max_display_width = int(final_w)
 
         figure_html = _build_figure_html(
             img_tag,

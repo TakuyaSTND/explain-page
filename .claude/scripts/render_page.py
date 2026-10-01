@@ -79,6 +79,21 @@
   - "diagram_text": "A -> B : 条件" のような1行記法（`visual/diagram_dsl.py`）から図を組む
   - "table" の "heat":[列番号,…] は数値セルの背景を段階的な濃さにし、
     "bars":[列番号,…] は数字の右に値/最大の細い棒を置く
+  - 2026-10-01（手書きのHTMLとの比べから足した部品）：
+    "image" は画面の写真（スクショ）もそのまま貼れる。小さい画像は元の幅より引き伸ばさない。
+      "marks" の各印に "style":"pin"（枠なしの点の番号）と "tone"（acc／good／warn／bad）
+    "screenshot": {"target":"手元のファイル か http://localhost…","viewport":[1280,800],
+      "selector","full_page","wait_ms","crop","marks","caption","source","width","num"}
+      （組むときに撮って image と同じに貼る。外部の頁は撮らない）
+    文中の "[[pin:3]]" / "[[pin:3:good]]" は画像の点の番号と同じ見た目の印（表の行頭に置く）
+    "table" の "stack":[列番号] はセル「62,3,0」を「62/65」と内訳の積み上げ棒にする
+      （"stack_labels":["正解","見落とし","誤り"]・"stack_tones":["good","warn","bad"]・凡例は表の上）
+      "frac":[列番号] は「62/65」の分母を薄く、"groups":[行番号] はその行の上に区切り線、
+      "row_head":true は1列目を行見出しにする。セルの改行の後は小さい注記になる
+    "stats": [{"value":"38","unit":"/ 38項目","label":"…","text":"…","tone":"good"}]（大きい数字）
+    "steps": [{"title":"…","text":"…"}] か「題：本文」の一覧（横並びの番号つき手順）
+    "chips": 語の一覧か [{"title":"…","items":[…],"note":"…"}]（短い語の札の束・数は自動）
+    content の "headline" は h1 を結論の1文にする（短い題は上の小さい行へ・<title> は題のまま）
   - 側柱の {"heading": "用語", "glossary": true} は、本文の用語ホバーのうち
     **本文で2回以上現れた語だけ**を正本の説明で並べる（1語も無ければ塊ごと出さない）
 
@@ -230,6 +245,18 @@ def to_artifact_shape(html):
     return NL.join([charset, title, style, body, ""])
 
 
+def content_of(spec):
+    """定義の content を返す。結論の見出し（headline）は content の中の欄。
+
+    2026-10-01：⚠️title と並べて定義の上の段に書いても効くようにする
+    （撮影で確かめたら、上の段に書いた見出しが黙って無視されていた）。
+    """
+    content = spec["content"]
+    if spec.get("headline") and isinstance(content, dict) and not content.get("headline"):
+        content = dict(content, headline=spec["headline"])
+    return content
+
+
 def build(spec, project_root=None):
     """定義から頁を組み、承認済みの置き場へ2つ書き出す。返るもの＝(完全版, 器用) のpath。"""
     plan = ExplanationPlan(
@@ -243,8 +270,9 @@ def build(spec, project_root=None):
         publish_policy=spec.get("publish", "always"),
     )
     _, entries = _glossary(project_root)
+    content = content_of(spec)
     html = render_components(
-        plan, title=spec["title"], content=spec["content"], glossary_entries=entries
+        plan, title=spec["title"], content=content, glossary_entries=entries
     )
     approved_root = _approved_root_for(project_root)
     os.makedirs(approved_root, exist_ok=True)
@@ -431,6 +459,11 @@ def density(text):
         ("採点格子", 'class="score"'),
         ("前後切替", 'class="compare"'),
         ("吹き出し", 'class="callout-legend"'),
+        # 2026-10-01（ユーザー承認の P2・P4・P7・P9）：手書きのHTMLとの比べから足した部品。
+        ("積み上げ棒", 'class="stack"'),
+        ("大きい数字", 'class="stats"'),
+        ("横並びの手順", 'class="hsteps"'),
+        ("語の札", 'class="chip-groups"'),
     )
     return [(name, body.count(needle)) for name, needle in marks]
 
@@ -504,9 +537,15 @@ def advise_density(counts, body_bytes):
             )
         if got["画像"] == 0:
             lines.append(
-                "画像が0＝スライドや写真があるなら "
+                "画像が0＝スライド・写真・画面の写真があるなら "
                 '"image":{"path":"…png","caption":"…","source":"…","num":"1"}'
-                "（data:URIで埋め込み・実測行が根拠欄へ自動で足される）"
+                "（data:URIで埋め込み・実測行が根拠欄へ自動で足される）。画面をその場で撮るなら "
+                '"screenshot":{"target":"http://localhost:3000","viewport":[1280,800]}'
+            )
+        if got["大きい数字"] == 0:
+            lines.append(
+                "大きい数字が0＝頁の頭に主要な数字があるなら "
+                '"stats":[{"value":"38","unit":"/ 38項目","label":"名札","text":"補足","tone":"good"}]'
             )
         if got["時間軸"] == 0:
             lines.append(

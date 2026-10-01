@@ -36,14 +36,20 @@ def _plan(*components: str) -> ExplanationPlan:
 class CellBreakTests(unittest.TestCase):
     """表のセルの中で改行できる（手書き頁は br を55回使っていた）。"""
 
-    def test_newline_inside_a_cell_becomes_a_break(self):
+    def test_newline_inside_a_cell_becomes_a_small_note(self):
+        # 2026-10-01（ユーザー承認の P5）：セルの改行の後は小さい注記になる（以前は br だけ）。
+        # 3行目以降は注記の中で改行する。注記にしない改行は [[br]] で書ける。
         html = render_components(
             _plan("table"),
             title="表",
-            content={"table": {"head": ["項目"], "rows": [["1行目" + NL + "2行目"]]}},
+            content={"table": {"head": ["項目"], "rows": [
+                ["1行目" + NL + "2行目" + NL + "3行目"],
+                ["前[[br]]後"],
+            ]}},
         )
 
-        self.assertIn("1行目<br>2行目", html)
+        self.assertIn('1行目<span class="cell-note">2行目<br>3行目</span>', html)
+        self.assertIn("前<br>後", html)
 
     def test_explicit_break_notation(self):
         html = render_components(

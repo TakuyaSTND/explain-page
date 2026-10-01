@@ -113,7 +113,8 @@ class EmbedImageTests(unittest.TestCase):
         )
         self.assertIn("<svg class=\"marks\"", result.html)
         self.assertIn("<rect", result.html)
-        self.assertIn("<circle", result.html)
+        # 2026-10-01：番号は SVG の丸から、画面の幅で縮まない HTML の丸（img-pin）に変えた。
+        self.assertIn('class="img-pin" data-style="box" data-tone="bad"', result.html)
         self.assertIn(">1<", result.html)
 
     # 8. deck + slide resolves via the working-folder glob (deck_root override).
