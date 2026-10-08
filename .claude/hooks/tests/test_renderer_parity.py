@@ -220,5 +220,55 @@ class EverythingTogetherTests(unittest.TestCase):
         self.assertEqual(inspection.missing_decision_parts, ())
 
 
+class UnpairedEmphasisTests(unittest.TestCase):
+    """対の無い ** は、空の <em></em> に化けて記号ごと消えるのでなく、文字のまま出す（2026-10-09）。"""
+
+    def _overview(self, text: str) -> str:
+        html = render_components(_plan("overview"), title="題", content={"overview": text})
+        return html.split('<p class="lede">', 1)[1].split("</p>", 1)[0]
+
+    def test_a_double_star_inside_a_word_stays_as_text(self):
+        self.assertEqual(self._overview("a**b"), "a**b")
+
+    def test_an_opening_double_star_with_no_close_stays_as_text(self):
+        self.assertEqual(self._overview("**x"), "**x")
+
+    def test_a_closing_double_star_alone_stays_as_text(self):
+        self.assertEqual(self._overview("x**"), "x**")
+
+    def test_an_empty_bold_stays_as_text(self):
+        self.assertEqual(self._overview("****"), "****")
+
+    def test_no_empty_emphasis_tag_is_ever_made(self):
+        for text in ("a**b", "**x", "x**", "****", "**a** と **b", "***x*", "*a* と **"):
+            html = self._overview(text)
+            self.assertNotIn("<em></em>", html, text)
+            self.assertNotIn("<strong></strong>", html, text)
+
+    def test_a_pair_around_text_is_still_bold_and_the_stray_one_stays(self):
+        self.assertEqual(
+            self._overview("**太字** と **対の無い"),
+            "<strong>太字</strong> と **対の無い",
+        )
+
+    def test_weak_emphasis_works_as_before(self):
+        self.assertEqual(self._overview("*弱い強調*"), "<em>弱い強調</em>")
+        self.assertEqual(self._overview("a*b*c"), "a<em>b</em>c")
+
+    def test_two_single_stars_still_pair_up_as_commonmark_does(self):
+        # 仕様どおりの挙動（3*4 と 5*6 を掛け算として書くと強調になる）＝変えない。
+        self.assertEqual(self._overview("3*4 and 5*6"), "3<em>4 and 5</em>6")
+
+    def test_a_double_star_inside_a_table_cell_and_a_list_item_stays_as_text(self):
+        html = render_components(
+            _plan("walkthrough"),
+            title="題",
+            content={"walkthrough": [{"heading": "節", "ordered": ["a**b"]}]},
+        )
+
+        self.assertNotIn("<em></em>", html)
+        self.assertIn("a**b", html)
+
+
 if __name__ == "__main__":
     unittest.main()

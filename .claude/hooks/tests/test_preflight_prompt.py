@@ -58,7 +58,11 @@ def _spec(reasons=("project_novice_default", "decision_required"), **extra):
 
 
 def _run_main(spec):
-    """main() を一時フォルダの置き場で走らせる。返るもの＝(出力, 完全版のpath, 完全版の本文)。"""
+    """main() を一時フォルダの置き場で走らせる。返るもの＝(出力, 完全版のpath, 完全版の本文)。
+
+    文字だけの版（<name>-text.txt）は同じ置き場に書かれる＝そのpathは完全版のpathの拡張子を
+    -text.txt に替えたもの（試験では一時フォルダが消えるので、pathの文字だけを使う）。
+    """
     fake_smoke = types.SimpleNamespace(status="pass", errors=(), metrics={})
     with tempfile.TemporaryDirectory() as td:
         spec_path = Path(td) / "spec.json"
@@ -92,10 +96,50 @@ class PrintedOnlyForDecisionPagesTests(unittest.TestCase):
         for number in range(1, 6):
             self.assertIn("\n%d. " % number, block)
 
-    def test_the_page_path_is_the_full_version(self):
+    def test_the_reader_is_given_the_text_only_version_and_the_full_page_for_looks(self):
         text, full, _html = _run_main(_spec())
+        text_path = full[:-len(".html")] + "-text.txt"
 
-        self.assertIn("頁: %s（Read で開く）" % full, text)
+        self.assertIn(
+            "頁（文字だけの版）: %s（Read で開く。画像・図・script・style を外した本文。"
+            "〔用語〕はホバーで説明の付く語）" % text_path,
+            text,
+        )
+        self.assertIn("元の頁（見た目の確認だけに使う）: %s" % full, text)
+        self.assertNotIn("頁: %s（Read で開く）" % full, text)
+        # 文字だけの版が先・元の頁が後（読み手が先に読むのは文字だけの版）。
+        self.assertLess(text.index("頁（文字だけの版）"), text.index("元の頁（見た目の確認だけに使う）"))
+
+    def test_the_machine_checked_items_are_not_given_to_the_reader(self):
+        text, _full, _html = _run_main(_spec())
+
+        block = text[text.index(START):text.index(END)]
+        self.assertIn(
+            "機械で済ませた検査（空の強調・図の記号・図番号の重複・問いへの飛び先）は見なくてよい。", block
+        )
+        self.assertLess(block.index("元の頁（見た目の確認だけに使う）"), block.index("機械で済ませた検査"))
+        self.assertLess(block.index("機械で済ませた検査"), block.index("読者宣言"))
+
+    def test_without_a_text_path_the_old_single_page_line_is_used(self):
+        prompt = rp.preflight_prompt(_spec(), "page.html")
+
+        self.assertIn("頁: page.html（Read で開く）", prompt)
+        self.assertNotIn("文字だけの版", prompt)
+        self.assertNotIn("元の頁", prompt)
+        self.assertIn("機械で済ませた検査", prompt)
+
+    def test_with_a_text_path_both_paths_are_named(self):
+        prompt = rp.preflight_prompt(_spec(), "page.html", "page-text.txt")
+
+        self.assertIn("頁（文字だけの版）: page-text.txt（Read で開く。", prompt)
+        self.assertIn("元の頁（見た目の確認だけに使う）: page.html", prompt)
+
+    def test_question_one_explains_the_arrow_marker_on_headings(self):
+        prompt = rp.preflight_prompt(_spec(), "page.html", "page-text.txt")
+        block = prompt[prompt.index(START):prompt.index(END)]
+        question_one = block[block.index("\n1. "):block.index("\n2. ")]
+
+        self.assertIn("節の見出しの「→ Q1」は、その節がどの問いに関わるかの印です。", question_one)
 
     def test_without_decision_required_nothing_is_printed(self):
         text, _full, _html = _run_main(_spec(reasons=("project_novice_default",)))

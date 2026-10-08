@@ -197,6 +197,23 @@ class WhereItLooksTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("Q2「二つ目」の「丁」", lines[0])
 
+    def test_groups_without_rows_do_not_take_a_question_number(self):
+        # 2026-10-09：選択肢・items・options が空の群は <fieldset> に入力欄が無く、回答文の問いにも
+        # 数えられない＝数えると、後ろの問いの番号が1つずれる。
+        content = {"sections": [
+            {"component": "decision", "content": {"groups": [
+                {"legend": "空の選択", "kind": "radio", "options": []},
+                {"legend": "空の段階", "kind": "scale", "items": []},
+                {"legend": "空の数", "kind": "number"},
+                _group([{"label": "甲", "recommended": True}, {"label": "乙"}], legend="実在の問い"),
+            ]}},
+        ]}
+
+        lines = rp.decision_option_warnings(content)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Q1「実在の問い」の「乙」", lines[0])
+
     def test_top_level_decision_is_used_when_the_section_list_has_none(self):
         content = {
             "sections": [{"component": "walkthrough", "content": "手順：本文"}],

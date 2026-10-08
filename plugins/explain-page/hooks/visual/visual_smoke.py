@@ -169,7 +169,7 @@ const { chromium } = require(playwrightPath);
           pageErrors.push('decision-controls-missing');
         } else {
           await radio.check();
-          // 2026-10-08：回答文は初期表示から「(未選択 = お任せ…)」の固定形になった（初期文で判定できない）。
+          // 2026-10-08：回答文は初期表示から未回答の固定形（「(見ていない…)」など）になった（初期文で判定できない）。
           // ∴押した選択肢の文が回答文に入ったかで見る（script が死ねば初期のまま＝落ちる）。
           const pickedLabel = (await radio.getAttribute('data-label')) || '';
           const promptAfterPick = (await prompt.textContent()) || '';

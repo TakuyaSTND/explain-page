@@ -304,6 +304,29 @@ class TheExemptionStaysClosedTests(SheetFlowCase):
 
 
 class PostToolUseSheetTests(SheetFlowCase):
+    def test_republishing_an_old_sheet_counts_it_for_this_turn(self):
+        # 2026-10-08（本物の会話で見つけた）：知らせが割り込んで回の始まりが公開の後ろへずれても、
+        #   返事の直前にシートを公開し直せば（PostToolUse が更新時刻を今にする）停止で通る。
+        self.prompt()
+        sheet = self.write(self.root / "akapen", "old.html", AKAPEN_SHEET, age=100.0)
+        before = sheet.stat().st_mtime
+
+        self.post(sheet)
+        result = self.stop()
+
+        self.assertGreater(sheet.stat().st_mtime, before + 50)
+        self.assertNotIn("decision", result)
+        self.assertIn("[sheet_only_turn]", result.get("systemMessage", ""))
+
+    def test_a_plain_page_outside_the_root_is_not_touched(self):
+        self.prompt()
+        page = self.write(self.other, "plain.html", "<html><body>x</body></html>", age=100.0)
+        before = page.stat().st_mtime
+
+        self.post(page)
+
+        self.assertEqual(page.stat().st_mtime, before)
+
     def test_a_sheet_in_the_root_makes_no_receipt_and_no_skip_record(self):
         self.prompt()
         sheet = self.write(self.root / "akapen", "x.html", AKAPEN_SHEET)

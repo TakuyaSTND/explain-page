@@ -49,7 +49,7 @@
       "provenance": {"source": "path/to/file.py", "owner": "local"},
       "sections": [
         {"component": "walkthrough", "num": "壱", "label": "自分で付けた見出し",
-         "content": "背景：本文"}
+         "content": "背景：本文", "asks": [1]}
       ],
       "rail": [{"heading": "用語", "glossary": true}]
     }
@@ -108,6 +108,16 @@
 
 節を一覧（sections）で書くと、**見出し・番号・順番・同じ部品の繰り返し**が自由になる。
 書き忘れた部品は末尾に自動で足すので、検品証は落ちない。
+2026-10-09：節の項目に "asks":[1, "Q2"] を書くと、その節の見出しに「→ Q1」「→ Q2」の飛び先が付く
+（判断の節の問いの番号＝上から数えた通し番号。1・"1"・"Q1" のどれでも書ける。sections の一覧の
+形でだけ効く）。
+
+2026-10-09（試問の費用を下げる）：機械で済む検査はこの道具が先に済ませる。
+  組む前＝図の記号が無い（icon が記号の正本に無い）箱は**組み立てを止める**（終了コード2）。
+         図番号の重複・対の無い **・asks の形は警告だけ（止めはしない）。
+  組んだ後＝図の下の注意・絵の欠け・空の強調・本文に残った **・飛び先切れを警告だけで知らせる。
+  書き出し＝<name>.html・<name>-artifact.html のほかに、画像・図・script・style を外した
+         <name>-text.txt（文字だけの版）を同じ置き場へ書く。判断の頁の試問はこの文字だけの版を読ませる。
 
 側柱（頁全体の2段組み）＝content に `"rail": [ {塊}, … ]` を足すと、
 広い画面（1100px以上）で本文の右に添え物が立つ。⚠️**側柱は節ではない**
@@ -124,6 +134,8 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from html import unescape
+from html.parser import HTMLParser
 
 NL = chr(10)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -151,6 +163,17 @@ from visual.section_labels import check_sections  # noqa: E402
 from visual.state import StateStore  # noqa: E402
 from visual.turn_marker import read_turn_marker  # noqa: E402
 from visual.visual_smoke import run_visual_smoke  # noqa: E402
+
+# 2026-10-09：記号の正本は visual.icons の ICON_NAMES。取り込めなかったときは記号の検査だけ飛ばす
+# （検査の道具の不具合で頁が組めなくならないように）。1行記法の変換器も同じ扱い。
+try:
+    from visual.icons import ICON_NAMES as _ICON_NAMES  # noqa: E402
+except Exception:  # noqa: BLE001
+    _ICON_NAMES = None
+try:
+    from visual.diagram_dsl import parse_diagram_text as _parse_diagram_text  # noqa: E402
+except Exception:  # noqa: BLE001
+    _parse_diagram_text = None
 
 # 2026-09-25：Codexの依頼の受付が残す印は、この時間より古ければ使わない
 # （visual/turn_marker.py の既定と揃える）。
@@ -677,6 +700,16 @@ def _decision_groups(value):
     ]
 
 
+def _group_rows(group, kind):
+    """その群が頁に出す行（選択肢・items・options）の中身。空なら問いの番号を取らない。
+
+    ⚠️render_components._decision_block の rows と同じ見方＝scale は items・それ以外は options。
+    行が1つも無い群は <fieldset> に入力欄が無く、回答文の問いにも数えられない
+    （2026-10-09：以前はここだけ数えていて、空の群があると番号が1つずれた）。
+    """
+    return group.get("items", ()) if kind == "scale" else group.get("options", ())
+
+
 def decision_option_warnings(content):
     """判断の問いが実質1択になっていないかを見て、警告の行の一覧を返す（空なら問題なし）。
 
@@ -691,7 +724,8 @@ def decision_option_warnings(content):
       測ると選択の群78のうち76が文字列だけで、警告が1件も出ない＝案1が効かない形だった。
       文字列の選択肢は render_components._decision_parts で推奨にならない（「推奨を入れる」の
       釦も効かない）ので、辞書の形へ寄せる指摘として数える。止めはしない。
-    ⚠️問いの番号 Q は頁全体の通し（free の群は数えない＝回答文の番号と同じ）。
+    ⚠️問いの番号 Q は頁全体の通し（free の群と、選択肢・items・options が空の群は数えない
+      ＝回答文の番号と同じ）。
     10行で打ち切り、残りは「ほかN件」の1行にまとめる。
     """
     lines = []
@@ -700,6 +734,8 @@ def decision_option_warnings(content):
         for group in _decision_groups(body):
             kind = (str(group.get("kind", "radio") or "radio")).lower()
             if kind == "free":
+                continue
+            if not _group_rows(group, kind):
                 continue
             number += 1
             if kind in ("scale", "number"):
@@ -737,6 +773,733 @@ def decision_option_warnings(content):
     return lines
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-09（試問の費用を下げる・Q1）：機械で済む検査は、人に見せる前にこの道具が先に済ませる。
+# 試問のサブエージェントに「空の強調」「存在しない記号」「図番号の重複」「問いへの飛び先切れ」を
+# 読ませると、頁を読む費用だけが掛かって見つかるのは機械で数えられる誤りだった（置き場の定義51本
+# で測り直した）。∴組む前の検査（定義を見る）と、組んだ後の検査（HTMLを見る）に分ける。
+# ⚠️止めるのは「不明な図の記号」だけ＝実測した3本とも本物の誤り（doc・search は無い記号）で、
+#   描かれずに箱だけ残る。ほかは全部警告（止めはしない）。単独の * は誤爆が多いので見ない。
+# ⚠️定義の中を歩くときは正規表現でなく索引と再帰で切り出す（この repo の決まり）。
+# ---------------------------------------------------------------------------
+# 文字列を見ない鍵＝中身が散文でなく、** や図番号を探す対象でないもの。
+TEXT_SKIP_KEYS = frozenset(("log", "diff", "tex", "svg", "path", "deck", "target", "selector"))
+# 図番号（num）を持つ図の鍵。節の num と箱の num は数えない。
+FIGURE_KEYS = ("diagram", "svg", "image", "screenshot", "timeline", "quadrant", "venn", "flow",
+               "score", "chart")
+_WALK_DEPTH_LIMIT = 40
+_EXCERPT_WIDTH = 40
+
+
+def _limit_lines(lines):
+    """警告が多いときは10行で打ち切り、残りを「ほかN件」の1行にまとめる。"""
+    if len(lines) > WARNING_LIMIT:
+        rest = len(lines) - WARNING_LIMIT
+        return lines[:WARNING_LIMIT] + ["   ほか%d件" % rest]
+    return lines
+
+
+def _section_places(content):
+    """検査で見る場所を、頁の文書順に近い形で返す。返るもの＝(節の見出し, 部品名, 値) の一覧。
+
+    節の一覧（sections）の各項目（content が無ければ content の同名の鍵）→ 一覧に無い部品名の鍵
+    → 側柱（rail）の順。⚠️組む側（render_components）と同じ規則だが、検査用なので細部がずれても
+    困らない（一覧に出した部品は、同名の上位の鍵を二重に見ない）。
+    """
+    if not isinstance(content, Mapping):
+        return []
+    places = []
+    emitted = set()
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if not isinstance(entry, Mapping):
+                continue
+            component = str(entry.get("component", "") or "").strip()
+            if not component:
+                continue
+            value = entry.get("content")
+            if value is None:
+                value = content.get(component)
+            if value is None:
+                continue
+            label = str(entry.get("label", "") or "").strip() or COMPONENT_LABELS.get(component, component)
+            places.append((label, component, value))
+            emitted.add(component)
+    for key, value in content.items():
+        if key in ("sections", "rail", "headline", "provenance") or key in emitted or value is None:
+            continue
+        places.append((COMPONENT_LABELS.get(key, key), key, value))
+    if content.get("rail") is not None:
+        places.append(("側柱", "rail", content["rail"]))
+    return places
+
+
+def _nodes(value, path="", key="", depth=0):
+    """値を深さ優先で歩く。返るもの＝(道筋, 鍵名, 値) を1つずつ（自分自身が先）。
+
+    ⚠️TEXT_SKIP_KEYS の鍵の下は、辞書でなければ歩かない（辞書の形の svg＝{"svg":…,"num":…}
+    のときだけ中へ入る）。一覧の要素は親の鍵名を引き継ぐ。
+    """
+    yield path, key, value
+    if depth >= _WALK_DEPTH_LIMIT:
+        return
+    if isinstance(value, Mapping):
+        for name, child in value.items():
+            name = str(name)
+            if name in TEXT_SKIP_KEYS and not isinstance(child, Mapping):
+                continue
+            yield from _nodes(child, path + "." + name if path else name, name, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            yield from _nodes(child, "%s[%d]" % (path, index), key, depth + 1)
+
+
+def _excerpt(text, around=0):
+    """警告の文に入れる抜粋。改行を畳み、around の少し前から40字で切る。"""
+    start = max(0, around - 12)
+    return " ".join(text[start:start + _EXCERPT_WIDTH].split())
+
+
+def _icon_problems(boxes, heading, kind, names, found):
+    for box in boxes:
+        if not isinstance(box, Mapping):
+            continue
+        icon = box.get("icon")
+        icon = "" if icon is None else str(icon)
+        if not icon or icon in names:
+            continue
+        title = box.get("title") or box.get("label") or box.get("id") or ""
+        found.append("「%s」の %s の箱「%s」の icon %r" % (heading, kind, _short(title), icon))
+
+
+def unknown_icons(content, icon_names=None):
+    """図の箱に書いた記号（icon）のうち、記号の正本（visual.icons の ICON_NAMES）に無いものを返す。
+
+    入れるもの＝頁の content。見る場所＝diagram の nodes の各 icon（flow の nodes は見ない）と、
+    diagram_text（1行記法）の A(icon=NAME)。返るもの＝「見出し」の diagram の箱「題」の icon 'doc'
+    のような行の一覧（空なら問題なし）。
+    ⚠️記号の正本が取り込めなかった（_ICON_NAMES が None）ときは検査を飛ばして空を返す。
+    ⚠️組む側は不明な記号を黙って捨て、箱だけ描いて頁の図の下に小さく注意を出す＝見落とされる。
+    ∴組む前に止める（main が return 2）。
+    """
+    names = _ICON_NAMES if icon_names is None else icon_names
+    if names is None:
+        return []
+    names = frozenset(names)
+    found = []
+    for heading, component, value in _section_places(content):
+        for _path, key, node in _nodes(value, "", component):
+            if isinstance(node, Mapping) and key != "flow" and isinstance(node.get("nodes"), (list, tuple)):
+                _icon_problems(node["nodes"], heading, "diagram", names, found)
+            elif key == "diagram_text" and isinstance(node, str) and _parse_diagram_text is not None:
+                try:
+                    parsed = _parse_diagram_text(node)
+                except Exception:  # noqa: BLE001 - 1行記法の不具合は記号の検査の外
+                    continue
+                _icon_problems(parsed.get("nodes", ()), heading, "diagram_text", names, found)
+    return found
+
+
+def _figure_kind(key, node):
+    """辞書 node が図なら、その種類（FIGURE_KEYS の鍵名）を返す。図でなければ空文字。"""
+    if not isinstance(node, Mapping):
+        return ""
+    if key in FIGURE_KEYS:
+        return key
+    if key == "visual" and ("nodes" in node or "bands" in node):
+        return "diagram"
+    return ""
+
+
+def _figure_label(num):
+    """図番号を比べる形にする。先頭の「図」と空白を外す（「図1」と「1」は同じ番号）。"""
+    text = "" if num is None else str(num).strip()
+    if text.startswith("図"):
+        text = text[1:].strip()
+    return text
+
+
+def duplicate_figure_numbers(content):
+    """図の num が頁の中で重なっていないかを見て、警告の行の一覧を返す（空なら問題なし）。
+
+    数えるのは FIGURE_KEYS の辞書が持つ自分の num だけ（節の num と箱の num は数えない）。
+    組む側は diagram の num をそのまま、image・screenshot は「図」を前置して出す
+    （既に「図」で始まれば前置しない）ので、diagram の「図1」と image の「1」は同じ「図1」になる。
+    """
+    kinds_by_label = {}
+    for _heading, component, value in _section_places(content):
+        for _path, key, node in _nodes(value, "", component):
+            kind = _figure_kind(key, node)
+            if not kind:
+                continue
+            label = _figure_label(node.get("num"))
+            if label:
+                kinds_by_label.setdefault(label, []).append(kind)
+    lines = []
+    for label, kinds in kinds_by_label.items():
+        if len(kinds) < 2:
+            continue
+        names = []
+        for kind in kinds:
+            if kind not in names:
+                names.append(kind)
+        lines.append("⚠️図番号の重複（止めはしない）: 「図%s」が %s で%d回" % (label, " と ".join(names), len(kinds)))
+    return _limit_lines(lines)
+
+
+def _without_code(text):
+    """バッククォートで囲んだ区間（組む側がコード書きにする所）を外す。閉じの無い ` はそのまま残す。"""
+    out = []
+    position = 0
+    while position < len(text):
+        if text[position] == "`":
+            end = text.find("`", position + 1)
+            if end >= 0:
+                position = end + 1
+                continue
+        out.append(text[position])
+        position += 1
+    return "".join(out)
+
+
+def unbalanced_emphasis(content):
+    """対になっていない ** がある文字列を見つけて、警告の行の一覧を返す（空なら問題なし）。
+
+    組む側（_render_inline）は対の無い ** を空の <em></em> にして文字を消す＝強調するつもりの
+    文が壊れる。バッククォートの区間と TEXT_SKIP_KEYS の鍵は見ない。単独の * は見ない
+    （「3*4 and 5*6」のような式が真の強調と区別できず、実測で全部誤爆だった）。
+    """
+    lines = []
+    for heading, component, value in _section_places(content):
+        for path, _key, node in _nodes(value, "", component):
+            if not isinstance(node, str) or "**" not in node:
+                continue
+            plain = _without_code(node)
+            if plain.count("**") % 2 == 0:
+                continue
+            lines.append(
+                "⚠️対になっていない ** がある（止めはしない）: 「%s」の %s 「%s」"
+                "＝太字にするなら閉じる・記号を見せたいなら言葉で書く"
+                % (_short(heading), path or component, _excerpt(plain, plain.rfind("**")))
+            )
+    return _limit_lines(lines)
+
+
+def _asks_number(item):
+    """asks の要素を問いの番号（1以上の整数）にする。読めなければ None。
+
+    ⚠️render_components 側の正規化と同じ規則＝整数はそのまま・文字列は先頭の Q／q を外して
+    数字だけなら整数・それ以外（真偽値・小数・0以下）は読めない。
+    """
+    if isinstance(item, bool):
+        return None
+    if isinstance(item, int):
+        number = item
+    elif isinstance(item, str):
+        text = item[1:] if item[:1] in ("Q", "q") else item
+        if not text.isdigit():
+            return None
+        number = int(text)
+    else:
+        return None
+    return number if number > 0 else None
+
+
+def asks_format_warnings(content):
+    """sections の各項目の asks（その節に関わる問いの番号の配列）の形を見て、警告の一覧を返す。
+
+    ⚠️asks は sections の一覧の形でだけ効く。配列でない・読めない要素は組む側が黙って捨てる
+    ので、ここで知らせる（止めはしない）。
+    """
+    lines = []
+    sections = content.get("sections") if isinstance(content, Mapping) else None
+    if not isinstance(sections, (list, tuple)):
+        return lines
+    for entry in sections:
+        if not isinstance(entry, Mapping) or "asks" not in entry:
+            continue
+        component = str(entry.get("component", "") or "").strip()
+        label = str(entry.get("label", "") or "").strip() or COMPONENT_LABELS.get(component, component)
+        asks = entry["asks"]
+        if not isinstance(asks, (list, tuple)):
+            lines.append(
+                "⚠️asks が配列でない（止めはしない）: 「%s」の asks は [1, 2] のような配列で書く"
+                "＝配列でないと見出しに「→ Q」の飛び先が付かない" % _short(label)
+            )
+            continue
+        for item in asks:
+            if _asks_number(item) is None:
+                lines.append(
+                    "⚠️asks に問いの番号として読めない値がある（止めはしない）: 「%s」の asks の %s"
+                    "＝1・\"1\"・\"Q1\" のように1以上の整数で書く（読めない値は捨てられる）"
+                    % (_short(label), _short(repr(item)))
+                )
+    return _limit_lines(lines)
+
+
+def _question_count(content):
+    """頁の問いの数＝回答文の番号と同じ数え方（free と、行の無い群は数えない）。"""
+    count = 0
+    for body in _decision_bodies(content):
+        for group in _decision_groups(body):
+            kind = (str(group.get("kind", "radio") or "radio")).lower()
+            if kind != "free" and _group_rows(group, kind):
+                count += 1
+    return count
+
+
+def asks_hint(content, reasons=()):
+    """判断の頁で asks を1つも書いていないときだけ、書き方の案内を1行返す（要らなければ空文字）。
+
+    判断の頁＝reasons に decision_required。問いが1つも無い頁には出さない。
+    """
+    if "decision_required" not in tuple(reasons or ()):
+        return ""
+    if not isinstance(content, Mapping) or _question_count(content) == 0:
+        return ""
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if isinstance(entry, Mapping) and isinstance(entry.get("asks"), (list, tuple)):
+                if any(_asks_number(item) is not None for item in entry["asks"]):
+                    return ""
+    return "ⓘ 問いに関わる節には \"asks\":[1] を書くと見出しに「→ Q1」の飛び先が付く"
+
+
+# --- 組んだ後の検査（HTMLを見る・全部警告） ---------------------------------
+
+def _all_between(text, start, end):
+    """start と end に挟まれた区間を全部、順に返す（索引で切り出す）。"""
+    found = []
+    position = 0
+    while True:
+        i = text.find(start, position)
+        if i < 0:
+            break
+        j = text.find(end, i + len(start))
+        if j < 0:
+            break
+        found.append(text[i + len(start):j])
+        position = j + len(end)
+    return found
+
+
+def _strip_tags(text):
+    """<…> を外す（索引で切り出す）。属性の中の > は組む側が &gt; にするので、素直に探してよい。"""
+    out = []
+    position = 0
+    while position < len(text):
+        if text[position] == "<":
+            end = text.find(">", position)
+            if end >= 0:
+                position = end + 1
+                continue
+        out.append(text[position])
+        position += 1
+    return "".join(out)
+
+
+class _VisibleText(HTMLParser):
+    """タグの外の文字だけを集める。pre・code・script・style・textarea の中は除く。"""
+
+    _SKIP = ("script", "style", "pre", "code", "textarea")
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data):
+        if not self._depth:
+            self.parts.append(data)
+
+
+def rendered_warnings(html):
+    """組んだ頁（完全版のHTML）を見て、警告の行の一覧を返す（空なら問題なし・全部止めはしない）。
+
+    見る範囲＝<body> 以降で最初の <script> より前。見るもの＝①図の下の注意（dia-warn）の各行
+    ②選択肢の絵を載せられなかった印（thumb-missing）③空の強調（<em></em>・<strong></strong>）
+    ④タグの外・pre/code の外に残った **（属性の中は見ない）⑤飛び先（#q-N）に対する id="q-N" が無い。
+    """
+    start = html.find("<body")
+    body = html[start:] if start >= 0 else html
+    cut = body.find("<script")
+    if cut >= 0:
+        body = body[:cut]
+    lines = []
+    for block in _all_between(body, '<ul class="dia-warn">', "</ul>"):
+        for item in _all_between(block, "<li>", "</li>"):
+            lines.append("⚠️図の下に警告が出ている（止めはしない）: " + _short(unescape(_strip_tags(item))))
+    for marker in ('<span class="thumb thumb-missing">', '<span class="thumb-missing">'):
+        for item in _all_between(body, marker, "</span>"):
+            lines.append("⚠️選択肢の絵が頁に載っていない（止めはしない）: " + _short(unescape(_strip_tags(item))))
+    empty_em = body.count("<em></em>")
+    empty_strong = body.count("<strong></strong>")
+    if empty_em or empty_strong:
+        lines.append(
+            "⚠️空の強調が頁に出ている（止めはしない）: <em></em> が%d個・<strong></strong> が%d個"
+            "＝対の無い * や ** が文字を消した（定義の文を見直す）" % (empty_em, empty_strong)
+        )
+    visible = _VisibleText()
+    visible.feed(body)
+    visible.close()
+    flat = " ".join(visible.parts)
+    stray = chr(0).join(visible.parts).count("**")
+    if stray:
+        lines.append(
+            "⚠️頁の本文に ** がそのまま出ている（止めはしない）: %d か所 「%s」"
+            "＝太字になっていない（対が閉じていないか、** が効かない場所に書いてある）"
+            % (stray, _excerpt(flat, flat.find("**")))
+        )
+    marker = 'href="#q-'
+    position = 0
+    missing = []
+    while True:
+        i = body.find(marker, position)
+        if i < 0:
+            break
+        digits = ""
+        for ch in body[i + len(marker):]:
+            if not ch.isdigit():
+                break
+            digits += ch
+        position = i + len(marker)
+        if digits and digits not in missing and 'id="q-%s"' % digits not in html:
+            missing.append(digits)
+    for digits in missing:
+        lines.append(
+            "⚠️見出しの「→ Q%s」の飛び先（#q-%s）が頁に無い（止めはしない）"
+            "＝asks の番号が問いの数を超えている" % (digits, digits)
+        )
+    return _limit_lines(lines)
+
+
+# --- 文字だけの版（試問のサブエージェントが読む・完全版より小さい） ---------
+
+def _join_wrapped(chunks):
+    """折り返された行の断片をつなぐ。英数字どうしが隣り合うときだけ空白を入れる。"""
+    out = ""
+    for chunk in chunks:
+        piece = " ".join(chunk.split())
+        if not piece:
+            continue
+        if out and out[-1].isascii() and out[-1].isalnum() and piece[0].isascii() and piece[0].isalnum():
+            out += " "
+        out += piece
+    return out
+
+
+class _TextOnly(HTMLParser):
+    """頁のHTMLから、画像・図・script・style・釦・回答文の欄を外した本文を行にする。
+
+    ⚠️行の区切りは「ブロックの要素の始まりと終わり」で付ける（行にする要素を列挙すると、列挙に
+    無い入れ物の中の文字が1行に溶ける）。表の行は「｜」でセルをつなぐ。
+    """
+
+    HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
+    BLOCK = frozenset((
+        "div", "section", "header", "main", "aside", "nav", "footer", "article", "p", "ul", "ol",
+        "li", "table", "thead", "tbody", "tfoot", "caption", "h1", "h2", "h3", "h4", "h5", "h6",
+        "legend", "label", "fieldset", "figure", "figcaption", "details", "summary", "blockquote",
+        "pre", "dl", "dt", "dd", "form",
+    ))
+    VOID = frozenset((
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source",
+        "track", "wbr",
+    ))
+    DROP = frozenset(("script", "style", "button", "template", "noscript", "title"))
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.lines = []
+        self.buf = []
+        self.prefix = ""
+        self.stack = []
+        self.drop_tag = ""
+        self.drop_depth = 0
+        self.svg = None
+        self.in_row = False
+        self.cells = 0
+        self.in_pc = 0
+        self.after_bold = False
+
+    # 行の組み立て
+    def _flush(self):
+        text = " ".join("".join(self.buf).split())
+        self.buf = []
+        if not text:
+            return
+        self.lines.append(self.prefix + text)
+        self.prefix = ""
+
+    def _blank(self):
+        if self.lines and self.lines[-1] != "":
+            self.lines.append("")
+
+    def _break(self):
+        if self.in_row:
+            self.buf.append(" ")
+        else:
+            self._flush()
+
+    def finish(self):
+        self._flush()
+
+    @staticmethod
+    def _input_marker(attrs, classes):
+        kind = (attrs.get("type") or "text").lower()
+        if kind == "radio":
+            return "( ) "
+        if kind == "checkbox":
+            return "[ ] "
+        if kind == "number":
+            label = " ".join((attrs.get("data-label") or attrs.get("aria-label") or "").split())
+            return "[数: %s] " % label if label else "[数] "
+        if kind in ("hidden", "submit", "button"):
+            return ""
+        if "q-note" in classes:
+            return "[補足欄]"
+        hint = " ".join((attrs.get("placeholder") or "").split())
+        return "[記入欄: %s]" % hint if hint else "[記入欄]"
+
+    # svg は中身を捨てて、題と文字だけにする
+    def _svg_start(self, tag, attrs):
+        svg = self.svg
+        svg["depth"] += 1
+        if tag == "title" and not svg["title"]:
+            svg["in_title"] = True
+            svg["title_chunks"] = []
+        elif tag == "text":
+            svg["chunks"] = []
+
+    def _svg_data(self, data):
+        svg = self.svg
+        if svg["in_title"]:
+            svg["title_chunks"].append(data)
+        elif svg["chunks"] is not None:
+            svg["chunks"].append(data)
+
+    def _svg_end(self, tag):
+        svg = self.svg
+        if tag == "title" and svg["in_title"]:
+            svg["in_title"] = False
+            svg["title"] = _join_wrapped(svg["title_chunks"])
+        elif tag == "text" and svg["chunks"] is not None:
+            text = _join_wrapped(svg["chunks"])
+            svg["chunks"] = None
+            if text:
+                svg["texts"].append(text)
+        svg["depth"] -= 1
+        if svg["depth"] == 0:
+            self._emit_svg()
+            self.svg = None
+
+    def _emit_svg(self):
+        svg = self.svg
+        texts = svg["texts"]
+        if "marks" in svg["classes"]:
+            if texts:
+                self.buf.append(" [画像の印: %s] " % "／".join(texts))
+            return
+        title = svg["title"] or " ".join(svg["label"].split())
+        body = "／".join(texts)
+        if len(body) > 400:
+            body = body[:399] + "…"
+        parts = []
+        if title:
+            parts.append(title)
+        if body:
+            parts.append("文字: " + body)
+        self.buf.append(" [図: %s] " % "｜".join(parts) if parts else " [図] ")
+
+    def handle_starttag(self, tag, attrs):
+        if self.drop_depth:
+            if tag == self.drop_tag and tag not in self.VOID:
+                self.drop_depth += 1
+            return
+        if self.svg is not None:
+            self._svg_start(tag, attrs)
+            return
+        attrs = dict(attrs)
+        classes = set((attrs.get("class") or "").split())
+        # 太字の見出し語の直後の span は、空白なしで続くと語と溶ける（<b>GOAL</b><span>…）。
+        if self.after_bold and tag == "span":
+            self.buf.append(" ")
+        self.after_bold = False
+        if tag == "svg":
+            self.svg = {
+                "depth": 1, "title": "", "title_chunks": [], "in_title": False,
+                "label": attrs.get("aria-label") or "", "classes": classes,
+                "texts": [], "chunks": None,
+            }
+            return
+        if (tag in self.DROP or tag == "textarea" or attrs.get("id") == "decision-prompt"
+                or "decision-actions" in classes):
+            if tag == "textarea":
+                self.buf.append("[自由記述欄]")
+            self.drop_tag = tag
+            self.drop_depth = 1
+            return
+        if tag == "img":
+            alt = " ".join((attrs.get("alt") or "").split())
+            self.buf.append(" [画像: %s] " % alt if alt else " [画像] ")
+            return
+        if tag == "input":
+            self.buf.append(self._input_marker(attrs, classes))
+            return
+        if tag == "br" and self.in_pc:
+            self.buf.append(" ／ ")
+            return
+        if tag in ("br", "hr"):
+            self._break()
+            return
+        if tag in self.VOID:
+            return
+        suffix = ""
+        kind = ""
+        if tag == "tr":
+            self._flush()
+            self.in_row = True
+            self.cells = 0
+        elif tag in ("td", "th"):
+            if self.cells:
+                self.buf.append("｜")
+            self.cells += 1
+        elif tag in self.BLOCK or "provenance-item" in classes:
+            if tag not in self.BLOCK:
+                kind = "pi"
+            self._break()
+            if not self.in_row:
+                if tag in self.HEADINGS:
+                    if tag in ("h1", "h2", "h3"):
+                        self._blank()
+                    self.prefix = "#" * min(int(tag[1]), 4) + " "
+                elif tag == "li":
+                    self.prefix = "- "
+                elif tag == "blockquote":
+                    self.prefix = "> "
+        elif tag == "span" and "t" in classes:
+            suffix = "〔用語〕"
+        elif "badge" in classes or "pin" in classes:
+            self.buf.append("[")
+            suffix = "]"
+        elif "sec-no" in classes or "q-no" in classes or "toc-no" in classes:
+            self.buf.append("[")
+            suffix = "] "
+        elif "item-label" in classes or "pro" in classes or "con" in classes:
+            suffix = "："
+        elif "pros-cons" in classes:
+            self.buf.append(" ")
+            self.in_pc += 1
+            kind = "pc"
+        elif "q-ref" in classes or "why" in classes:
+            self.buf.append(" ")
+        self.stack.append((tag, suffix, kind))
+
+    def handle_endtag(self, tag):
+        if self.drop_depth:
+            if tag == self.drop_tag:
+                self.drop_depth -= 1
+            return
+        if self.svg is not None:
+            self._svg_end(tag)
+            return
+        if tag in self.VOID:
+            return
+        suffix = None
+        kind = ""
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                suffix = self.stack[index][1]
+                kind = self.stack[index][2]
+                if kind == "pc":
+                    self.in_pc -= 1
+                del self.stack[index:]
+                break
+        if suffix is None:
+            return
+        if suffix:
+            self.buf.append(suffix)
+        if tag in ("b", "strong") and not suffix:
+            self.after_bold = True
+        if tag == "tr":
+            self._flush()
+            self.in_row = False
+        elif tag in ("td", "th"):
+            return
+        elif tag in self.BLOCK or kind == "pi":
+            if not self.in_row and (tag in self.HEADINGS or tag in ("li", "blockquote")):
+                self._flush()
+                self.prefix = ""
+            else:
+                self._break()
+
+    def handle_data(self, data):
+        if self.drop_depth:
+            return
+        if self.svg is not None:
+            self._svg_data(data)
+            return
+        self.after_bold = False
+        self.buf.append(data)
+
+
+def text_only(html, name=""):
+    """頁のHTML（完全版）から、文字だけの版の本文を返す。
+
+    入れるもの＝完全版のHTMLと、元の頁の名前（拡張子なし）。返るもの＝UTF-8のテキスト。
+    外すもの＝script・style・釦・回答文の欄（#decision-prompt・.decision-actions）・画像の本体
+    （data: の画像も）。図（svg）は題と中の文字だけ、画像は alt だけを角括弧で残す。
+    ⚠️用語の説明（data-d）は載せない＝語の後ろに〔用語〕を付けるだけ（頁の「用語」の節に説明がある）。
+    """
+    start = html.find("<body")
+    source = html[start:] if start >= 0 else html
+    parser = _TextOnly()
+    parser.feed(source)
+    parser.close()
+    parser.finish()
+    lines = []
+    for line in parser.lines:
+        if line == "" and (not lines or lines[-1] == ""):
+            continue
+        lines.append(line)
+    while lines and lines[-1] == "":
+        lines.pop()
+    origin = "。元の頁: %s.html" % name if name else ""
+    header = "（文字だけの版＝画像・図・script・style を外した本文。〔用語〕はホバーで説明の付く語%s）" % origin
+    return header + NL + NL + NL.join(lines) + NL
+
+
+def text_path_for(full_path):
+    """完全版のpathから、文字だけの版のpath（同じ置き場の <name>-text.txt）を決める。"""
+    base, _ext = os.path.splitext(full_path)
+    return base + "-text.txt"
+
+
+def write_text_only(full_path):
+    """完全版の隣に文字だけの版（<name>-text.txt）を書き、そのpathを返す。
+
+    ⚠️.html でないのでフックは触らない（フックが見るのは .html だけ）。
+    失敗しても頁の組み立ては止めない（呼び出し側が例外を受けて1行で知らせる）。
+    """
+    with io.open(full_path, encoding="utf-8", errors="replace") as handle:
+        html = handle.read()
+    name = os.path.splitext(os.path.basename(full_path))[0]
+    path = text_path_for(full_path)
+    with io.open(path, "w", encoding="utf-8", newline=NL) as handle:
+        handle.write(text_only(html, name))
+    return path
+
+
 # 2026-10-08（判断の頁を赤ペン流に寄せた・案5）：判断の頁だけ、人に見せる前に
 # 文脈ゼロのサブエージェントに読ませる試問の文を出す。
 # ⚠️判断の頁（reasons に decision_required）以外では出さない＝毎回の費用を判断の回に限る。
@@ -759,11 +1522,15 @@ def _heading_text(spec, component):
     return "".join("「%s」" % label for label in (labels or [default]))
 
 
-def preflight_prompt(spec, page_path):
+def preflight_prompt(spec, page_path, text_path=None):
     """判断の頁の試問の文を返す（貼り付け用の本文は「ここから」〜「ここまで」の間）。
 
-    入れるもの＝頁の定義と、組んだ完全版の頁のpath。任意の spec["preflight"] は
-    {"reader":"読者宣言の1行","allowed":["語",…]}（無ければ既定の読者・許可語なし）。
+    入れるもの＝頁の定義と、組んだ完全版の頁のpath、文字だけの版のpath（text_path・任意）。
+    任意の spec["preflight"] は {"reader":"読者宣言の1行","allowed":["語",…]}
+    （無ければ既定の読者・許可語なし）。
+    2026-10-09：text_path があれば、試問の読み手にはその文字だけの版を読ませる（画像・図・script・
+    style を外した本文＝完全版より小さく、読むのに掛かる費用が減る）。完全版は見た目の確認だけに使う。
+    機械で済ませた検査（空の強調・図の記号・図番号の重複・問いへの飛び先）は読み手に求めない。
     """
     preflight = spec.get("preflight")
     preflight = preflight if isinstance(preflight, Mapping) else {}
@@ -776,6 +1543,15 @@ def preflight_prompt(spec, page_path):
     decision = _heading_text(spec, "decision")
     evidence = _heading_text(spec, "evidence")
     glossary = _heading_text(spec, "glossary")
+    if text_path:
+        page_lines = [
+            "頁（文字だけの版）: %s（Read で開く。画像・図・script・style を外した本文。"
+            "〔用語〕はホバーで説明の付く語）" % text_path,
+            "元の頁（見た目の確認だけに使う）: %s" % page_path,
+        ]
+    else:
+        page_lines = ["頁: %s（Read で開く）" % page_path]
+    page_lines.append("機械で済ませた検査（空の強調・図の記号・図番号の重複・問いへの飛び先）は見なくてよい。")
     return NL.join([
         "[試問] この頁は判断を求める（reasons に decision_required）＝人に見せる前に、"
         "下の文を文脈ゼロのサブエージェント（Claude Code なら general-purpose）にそのまま渡し、"
@@ -786,13 +1562,14 @@ def preflight_prompt(spec, page_path):
         "---- ここから ----",
         "次の HTML は、人に判断を求める頁です。"
         "あなたは何も知らない読者として読み、5 つの問いに答えてください。",
-        "頁: %s（Read で開く）" % page_path,
+        *page_lines,
         "読者宣言: %s。説明なしで使ってよい語%s（頁の%sの節とホバーで説明の付いた語は除く）"
         % (reader, allowed_text, glossary),
         "1. %sの節の各問について、それぞれの選択肢を選んだ場合に何が変わるかを、"
         "この頁だけから説明してください。説明できない問いは「説明不能」と書いてください。"
         "続けて、%sの節の入力欄だけを見て（上の本文を見ずに）、各選択肢の違いが分かるか答えてください。"
-        "見た目が違うのに絵が無い選択肢があれば、その問いを挙げてください。" % (decision, decision),
+        "見た目が違うのに絵が無い選択肢があれば、その問いを挙げてください。"
+        "節の見出しの「→ Q1」は、その節がどの問いに関わるかの印です。" % (decision, decision),
         "2. 頁の断定（本文・判定・推奨）に、%sの節の表の行が対応していますか。"
         "対応する行が無い断定を挙げてください。" % evidence,
         "3. 推奨でない選択肢を選ぶ理由（利点）が読み取れますか。"
@@ -874,6 +1651,34 @@ def main(argv):
         for problem in problems:
             print("   ・" + problem)
         return 2
+    # 2026-10-09（試問の費用を下げる・Q1）：存在しない図の記号は、組む前に止める（唯一の「止める」検査）。
+    # ⚠️組む側は不明な記号を黙って捨てて箱だけ描く＝頁を読むまで気づけない。実測で本物の誤りだけだった。
+    #   この検査の道具が壊れているとき（記号の正本が取り込めない・例外）は止めずに続ける。
+    try:
+        bad_icons = unknown_icons(spec["content"])
+    except Exception as exc:  # noqa: BLE001 - 検査の不具合で頁が組めなくならないように
+        bad_icons = []
+        print("ⓘ 図の記号の検査は走らなかった（%s）" % exc)
+    if bad_icons:
+        print("⚠️図の記号が無い＝組み立てを止めた")
+        for item in bad_icons:
+            print("   ・" + item)
+        names = tuple(_ICON_NAMES or ())
+        print("   使える記号（全%d個）: %s" % (len(names), ", ".join(names)))
+        return 2
+    # 2026-10-09：ほかの組む前の検査（図番号の重複・対の無い **・asks の形・asks の案内）＝全部止めない。
+    for check_fn in (duplicate_figure_numbers, unbalanced_emphasis, asks_format_warnings):
+        try:
+            for warning in check_fn(spec["content"]):
+                print(warning)
+        except Exception as exc:  # noqa: BLE001 - 助言の検査なので頁の組み立てを止めない
+            print("ⓘ %s は走らなかった（%s）" % (check_fn.__name__, exc))
+    try:
+        hint = asks_hint(spec["content"], spec.get("reasons", ()))
+        if hint:
+            print(hint)
+    except Exception as exc:  # noqa: BLE001
+        print("ⓘ asks の案内は出せなかった（%s）" % exc)
     # 2026-10-08（判断の頁を赤ペン流に寄せた・案1）：推奨があるのに非推奨の案に利点が無い問いを知らせる。
     # ⚠️止めない（知らせるだけ）。この検査の不具合で頁が組めなくならないよう、落ちても続ける。
     try:
@@ -882,7 +1687,20 @@ def main(argv):
     except Exception as exc:  # noqa: BLE001 - 助言の検査なので頁の組み立てを止めない
         print("ⓘ 実質1択の検査は走らなかった（%s）" % exc)
     full, shaped = build(spec, project_root)
-    lines = ["書き出した:", "  完全版 (検品証用): " + full, "  器用 (publish用) : " + shaped, ""]
+    # 2026-10-09（試問の費用を下げる・Q1）：試問の読み手に渡す文字だけの版を、完全版の隣へ書く。
+    # ⚠️失敗しても止めない（試問が完全版を読むだけに戻る）。
+    text_path = None
+    text_note = ""
+    try:
+        text_path = write_text_only(full)
+    except Exception as exc:  # noqa: BLE001 - 試問の補助なので頁の組み立てを止めない
+        text_note = "ⓘ 文字だけの版は書けなかった（%s）" % exc
+    lines = ["書き出した:", "  完全版 (検品証用): " + full, "  器用 (publish用) : " + shaped]
+    if text_path:
+        lines.append("  文字だけの版 (試問用): " + text_path)
+    if text_note:
+        lines.append(text_note)
+    lines.append("")
     bad = 0
     full_check = None
     for label, path in (("完全版", full), ("器用", shaped)):
@@ -906,6 +1724,15 @@ def main(argv):
     # ⚠️指示文に書いただけでは効かなかった（別セッションの頁で実測）。
     #   ∴その人が実際に走らせるこの道具の出力で言う。
     built = io.open(full, encoding="utf-8", errors="replace").read()
+    # 2026-10-09（試問の費用を下げる・Q1）：組んだ後の検査（空の強調・図の下の注意・絵の欠け・飛び先切れ）。
+    # ⚠️全部止めない。この検査の不具合で結果の表示が欠けないよう、落ちても続ける。
+    try:
+        rendered = rendered_warnings(built)
+    except Exception as exc:  # noqa: BLE001
+        rendered = ["ⓘ 組んだ後の検査は走らなかった（%s）" % exc]
+    if rendered:
+        lines.append("")
+        lines.extend(rendered)
     counts = density(built)
     body_bytes = len(built.encode("utf-8"))
     lines.append("")
@@ -921,7 +1748,7 @@ def main(argv):
     if "decision_required" in tuple(spec.get("reasons", ()) or ()):
         lines.append("")
         try:
-            lines.append(preflight_prompt(spec, full))
+            lines.append(preflight_prompt(spec, full, text_path))
         except Exception as exc:  # noqa: BLE001 - 助言なので頁の組み立ての結果は変えない
             lines.append("ⓘ 試問の文は組めなかった（%s）" % exc)
     # 2026-09-25：--runtime codex の時だけ、完全版について検品の記録を1件残す。

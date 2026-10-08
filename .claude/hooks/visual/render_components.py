@@ -103,24 +103,36 @@ LABELS = {
     "log": "実行の記録",
 }
 
+# 回答文の未回答は「見た／見ていない」×「推奨がある／無い」の4種（2026-10-09）。
+# 「見た」＝その問い（fieldset）が、自分の高さと表示域の高さの小さいほうの半分以上、1秒表示されていた
+# （IntersectionObserver）、または問いの中で focusin・click・input が起きた。「推奨をまとめて選択」は
+# 触ったことにしない。「入力を消す」は見た状態も消す。見た状態は下書き（localStorage）の s に残す。
+# ⚠️この script は全頁共通の唯一の script＝検品の Gate は DECISION_SCRIPT.strip() との完全一致を求める。
+#   script の中に書く注釈は頁ごとにバイトを増やすので、ここ（Python 側）に置く。
 DECISION_SCRIPT = r"""const prompt=document.getElementById('decision-prompt');
 const fields=[...document.querySelectorAll('[data-req]')];
 const objections=[...document.querySelectorAll('input[type="checkbox"][name="objection"]')];
 const objection=document.getElementById('decision-objection');
 const notes=[...document.querySelectorAll('input.q-note')];
 const MEMORY_KEY='uc:'+document.title;
-const NONE='(未選択 = お任せ＝推奨で進める)';
+const SEEN_REC='(見たうえで推奨のまま)';
+const UNSEEN_REC='(見ていない＝推奨で進めるが、大事なら会話で確かめる)';
+const SEEN_NOREC='(見たうえで未選択＝任せる)';
+const UNSEEN_NOREC='(見ていない・推奨なし＝会話で確かめる)';
+let seen=[];const timers=[];let io=null;
 function whys(){return [...document.querySelectorAll('.obj-why')];}
 function clean(s){return String(s||'').replace(/\s+/g,' ').trim();}
-function remember(){try{localStorage.setItem(MEMORY_KEY,JSON.stringify({v:fields.map(x=>x.type==='radio'||x.type==='checkbox'?x.checked:x.value),o:objections.map(x=>x.checked),w:whys().map(x=>x.value),f:objection?objection.value:'',n:notes.map(x=>x.value)}));}catch(e){}}
-function recall(){try{const raw=localStorage.getItem(MEMORY_KEY);if(!raw)return;const s=JSON.parse(raw);(s.v||[]).forEach((v,i)=>{const f=fields[i];if(!f)return;if(f.type==='radio'||f.type==='checkbox'){f.checked=!!v;}else{f.value=v;}});(s.o||[]).forEach((v,i)=>{if(objections[i])objections[i].checked=v;});const w=whys();(s.w||[]).forEach((v,i)=>{if(w[i])w[i].value=v;});(s.n||[]).forEach((v,i)=>{if(notes[i])notes[i].value=v;});if(objection&&typeof s.f==='string')objection.value=s.f;}catch(e){}}
+function remember(){try{localStorage.setItem(MEMORY_KEY,JSON.stringify({v:fields.map(x=>x.type==='radio'||x.type==='checkbox'?x.checked:x.value),o:objections.map(x=>x.checked),w:whys().map(x=>x.value),f:objection?objection.value:'',n:notes.map(x=>x.value),s:seen.map(x=>!!x)}));}catch(e){}}
+function recall(){try{const raw=localStorage.getItem(MEMORY_KEY);if(!raw)return;const s=JSON.parse(raw);seen=(Array.isArray(s.s)?s.s:[]).map(x=>!!x);(s.v||[]).forEach((v,i)=>{const f=fields[i];if(!f)return;if(f.type==='radio'||f.type==='checkbox'){f.checked=!!v;}else{f.value=v;}});(s.o||[]).forEach((v,i)=>{if(objections[i])objections[i].checked=v;});const w=whys();(s.w||[]).forEach((v,i)=>{if(w[i])w[i].value=v;});(s.n||[]).forEach((v,i)=>{if(notes[i])notes[i].value=v;});if(objection&&typeof s.f==='string')objection.value=s.f;}catch(e){}}
 function questions(){return [...document.querySelectorAll('section[data-component="decision"] fieldset')].filter(f=>!f.classList.contains('objections')&&!f.querySelector('#decision-objection')&&f.querySelector('[data-req]'));}
+function legendText(f){const lg=f.querySelector('legend');if(!lg)return '';const c=lg.cloneNode(true);c.querySelectorAll('.q-no').forEach(x=>x.remove());return clean(c.textContent);}
+function none(f,i,scope){const rec=!!(scope||f).querySelector('[data-rec="1"]');return rec?(seen[i]?SEEN_REC:UNSEEN_REC):(seen[i]?SEEN_NOREC:UNSEEN_NOREC);}
 function build(){if(!prompt)return;const lines=['【頁の回答】'+clean(document.title)];
-questions().forEach((f,i)=>{const n=i+1,lg=f.querySelector('legend'),legend=lg?clean(lg.textContent):'',nt=f.querySelector('input.q-note'),note=nt?clean(nt.value):'',heads=[...f.querySelectorAll('.scale-head')];
-if(heads.length){heads.forEach((h,j)=>{const st=h.querySelector('strong'),c=h.parentElement.querySelector('input:checked');lines.push('Q'+n+'-'+(j+1)+'. '+clean((st||h).textContent)+': '+(c?clean(c.parentElement.textContent):NONE));});if(note)lines.push('Q'+n+' 補足. '+legend+': '+note);return;}
+questions().forEach((f,i)=>{const n=i+1,legend=legendText(f),nt=f.querySelector('input.q-note'),note=nt?clean(nt.value):'',heads=[...f.querySelectorAll('.scale-head')];
+if(heads.length){heads.forEach((h,j)=>{const st=h.querySelector('strong'),c=h.parentElement.querySelector('input:checked');lines.push('Q'+n+'-'+(j+1)+'. '+clean((st||h).textContent)+': '+(c?clean(c.parentElement.textContent):none(f,i,h.parentElement)));});if(note)lines.push('Q'+n+' 補足. '+legend+': '+note);return;}
 const nums=[...f.querySelectorAll('input[type="number"]')];let body;
-if(nums.length){const got=nums.filter(x=>x.value.trim()!=='').map(x=>{const u=x.parentElement.querySelector('.unit');return x.dataset.label+'='+x.value.trim()+(u?clean(u.textContent):'');});body=got.length?got.join('、'):NONE;}
-else{const got=[...f.querySelectorAll('[data-req]')].filter(x=>x.checked).map(x=>x.dataset.label);body=got.length?got.join('、'):NONE;}
+if(nums.length){const got=nums.filter(x=>x.value.trim()!=='').map(x=>{const u=x.parentElement.querySelector('.unit');return x.dataset.label+'='+x.value.trim()+(u?clean(u.textContent):'');});body=got.length?got.join('、'):none(f,i);}
+else{const got=[...f.querySelectorAll('[data-req]')].filter(x=>x.checked).map(x=>x.dataset.label);body=got.length?got.join('、'):none(f,i);}
 lines.push('Q'+n+'. '+legend+': '+body+(note?' / 補足: '+note:''));});
 objections.filter(x=>x.checked).forEach(x=>{const row=x.closest('.obj-row')||x.closest('.obj'),w=row?row.querySelector('.obj-why'):null,why=w&&w.value.trim()?w.value.trim():'（未記入）';lines.push('異議. '+x.dataset.label+': '+why);});
 lines.push('自由記述: '+(objection&&objection.value.trim()?objection.value.trim():'(なし)'));
@@ -134,7 +146,7 @@ notes.forEach(x=>x.addEventListener('input',build));
 const recommend=document.getElementById('recommend-decision');
 if(recommend)recommend.addEventListener('click',()=>{fields.filter(x=>x.dataset.rec==='1').forEach(x=>{if(x.type==='radio'||x.type==='checkbox')x.checked=true;});build();recommend.textContent='推奨を入れました';});
 const forget=document.getElementById('forget-decision');
-if(forget)forget.addEventListener('click',()=>{try{localStorage.removeItem(MEMORY_KEY);}catch(e){}fields.forEach(x=>{if(x.type==='radio'||x.type==='checkbox'){x.checked=false;}else{x.value='';}});objections.forEach(x=>{x.checked=false;});whys().forEach(x=>{x.value='';});notes.forEach(x=>{x.value='';});if(objection)objection.value='';build();forget.textContent='消しました';});
+if(forget)forget.addEventListener('click',()=>{try{localStorage.removeItem(MEMORY_KEY);}catch(e){}fields.forEach(x=>{if(x.type==='radio'||x.type==='checkbox'){x.checked=false;}else{x.value='';}});objections.forEach(x=>{x.checked=false;});whys().forEach(x=>{x.value='';});notes.forEach(x=>{x.value='';});if(objection)objection.value='';seen=[];timers.forEach((t,i)=>{if(t)clearTimeout(t);timers[i]=0;});build();if(io)questions().forEach(f=>{io.unobserve(f);io.observe(f);});forget.textContent='消しました';});
 const copy=document.getElementById('copy-decision');
 const select=document.getElementById('select-decision');
 function selectPrompt(){if(!prompt)return;const range=document.createRange();range.selectNodeContents(prompt);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);}
@@ -143,6 +155,10 @@ if(copy)copy.addEventListener('click',async()=>{build();try{if(!navigator.clipbo
 const theme=document.getElementById('theme-toggle');
 if(theme)theme.addEventListener('click',()=>{const root=document.documentElement;const current=root.getAttribute('data-theme');const dark=current?current==='dark':(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);root.setAttribute('data-theme',dark?'light':'dark');});
 recall();build();
+const qs=questions();
+function markSeen(i){if(i<0||seen[i])return;seen[i]=true;if(timers[i]){clearTimeout(timers[i]);timers[i]=0;}build();}
+qs.forEach((f,i)=>{['focusin','click','input'].forEach(ev=>f.addEventListener(ev,()=>markSeen(i)));});
+if(typeof IntersectionObserver==='function'){io=new IntersectionObserver(entries=>{entries.forEach(e=>{const i=qs.indexOf(e.target);if(i<0||seen[i])return;const viewH=(e.rootBounds&&e.rootBounds.height)||innerHeight;const need=0.5*Math.min(e.boundingClientRect.height,viewH)-2;const on=e.isIntersecting&&e.intersectionRect.height>=need;if(on&&!timers[i]){timers[i]=setTimeout(()=>{timers[i]=0;markSeen(i);},1000);}else if(!on&&timers[i]){clearTimeout(timers[i]);timers[i]=0;}});},{threshold:[0,.1,.2,.3,.4,.5,.6,.7,.8,.9,1]});qs.forEach(f=>io.observe(f));}
 const tocLinks=[...document.querySelectorAll('.toc a')];
 if(tocLinks.length){
 const byId=new Map(tocLinks.map(a=>[a.getAttribute('href').slice(1),a]));
@@ -442,7 +458,7 @@ def _render_inline(
                 continue
         if text.startswith("**", position):
             end = text.find("**", position + 2)
-            if end >= 0:
+            if end > position + 2:
                 output.append(
                     _escape_with_tooltips(text[plain_start:position], entries, seen)
                 )
@@ -454,6 +470,11 @@ def _render_inline(
                 position = end + 2
                 plain_start = position
                 continue
+            # 2026-10-09：閉じが無い **、または中身が空の ****。
+            # ⚠️以前は下の「弱い強調」へ落ちて、対の無い ** が空の <em></em> に化けて
+            #   記号ごと消えていた。文字のまま出す（後ろへ読み進めるだけ＝plain_start は動かさない）。
+            position += 2
+            continue
         if text[position] == "*":
             # ⚠️**太字** は上で処理済みなので、ここに来る * は弱い強調だけ。
             end = text.find("*", position + 1)
@@ -3536,12 +3557,19 @@ def _decision_block(
     value: object,
     glossary_entries: Mapping[str, GlossaryEntry] | None = None,
     seen_terms: set[str] | None = None,
+    *,
+    question_counter: list[int] | None = None,
 ) -> str:
     """判断コンソール。質問群をいくつでも置ける。
 
     入れるもの＝`{"groups":[...], "judgments":[...], "note":"…"}`。
     群は `{"legend","intro","kind":"radio|checkbox|scale|number|free","options"|"items","note"}`。
     ⚠️これまでの書き方（options / judgments / multi / numbers）もそのまま動く。
+
+    問いの番号（2026-10-09）＝選ぶ行が1つ以上ある群（free でない）に、頁の先頭から通しで
+    1・2・3… を振り、`<fieldset id="q-N">` と `<span class="q-no">QN</span>` を付ける。
+    JS の questions()（回答文の Q 番号）と**同じ規則**で数えるので、2つの判断の節を
+    またいでも番号が続く（`question_counter` は次の番号を1つ持つ1要素の一覧）。
     """
     entries = glossary_entries or {}
     seen = seen_terms if seen_terms is not None else set()
@@ -3581,6 +3609,7 @@ def _decision_block(
     else:
         groups = [{"legend": "選択肢", "kind": "radio", "options": [value]}]
 
+    counter = question_counter if question_counter is not None else [1]
     blocks = []
     for index, group in enumerate(groups, start=1):
         if not isinstance(group, Mapping):
@@ -3679,8 +3708,18 @@ def _decision_block(
             if rows and kind != "free"
             else ""
         )
+        question_no = 0
+        if rows and kind != "free":
+            question_no = counter[0]
+            counter[0] += 1
+        fieldset_open = (
+            '<fieldset id="q-%d"><legend><span class="q-no">Q%d</span>'
+            % (question_no, question_no)
+            if question_no
+            else "<fieldset><legend>"
+        )
         blocks.append(
-            "<fieldset><legend>"
+            fieldset_open
             + _render_inline(legend, entries, seen)
             + "</legend>"
             + intro_html
@@ -3733,6 +3772,45 @@ def _decision_block(
         + '<button id="select-decision" class="secondary" type="button">全部選ぶ</button>'
         + '<button id="forget-decision" class="secondary" type="button">入力を消す</button>'
         + "</div>"
+    )
+
+
+def _question_numbers(asks: object) -> list[int]:
+    """節の `asks`（関わる問いの番号）を整数の一覧に直す。
+
+    1・"1"・"Q1"・"q1" のどれでも受ける。読めない要素・0 以下は黙って捨て、重複は1つにする。
+    ⚠️bool は int の仲間だが番号ではない（true を 1 と読まない）。
+    """
+    if asks is None:
+        return []
+    if isinstance(asks, (str, int)):
+        asks = (asks,)
+    if not isinstance(asks, (list, tuple)):
+        return []
+    numbers: list[int] = []
+    for item in asks:
+        number = 0
+        if isinstance(item, bool):
+            number = 0
+        elif isinstance(item, int):
+            number = item
+        elif isinstance(item, str):
+            text = item.strip()
+            if text[:1] in ("Q", "q"):
+                text = text[1:].strip()
+            if text.isascii() and text.isdigit():
+                number = int(text)
+        if number > 0 and number not in numbers:
+            numbers.append(number)
+    return numbers
+
+
+def _question_refs(asks: object) -> str:
+    """見出しの直後に並べる「→ Q1」の飛び先。asks が無い・読めないときは空。"""
+    return "".join(
+        '<a class="q-ref" href="#q-%d" aria-label="Q%d へ移動">→ Q%d</a>'
+        % (number, number, number)
+        for number in _question_numbers(asks)
     )
 
 
@@ -3830,10 +3908,24 @@ def render_components(
     if sections:
         toc_entries.append(("sec-1", "", LABELS["summary"]))
 
-    def _one_section(component: str, body_value: object, label: str, num: str) -> str:
-        """節を1つ組む。⚠️見出しは**呼び側が決められる**（部品名に縛られない）。"""
+    question_counter = [1]
+
+    def _one_section(
+        component: str,
+        body_value: object,
+        label: str,
+        num: str,
+        asks: object = (),
+    ) -> str:
+        """節を1つ組む。⚠️見出しは**呼び側が決められる**（部品名に縛られない）。
+
+        asks（2026-10-09）＝この節が関わる問いの番号。見出しの文字の直後に
+        「→ Q1」の飛び先（`#q-1`）を並べる。目次には出さない。
+        """
         body = (
-            _decision_block(body_value, entries, seen_terms)
+            _decision_block(
+                body_value, entries, seen_terms, question_counter=question_counter
+            )
             if component == "decision"
             else _text_block(body_value, component, entries, seen_terms)
         )
@@ -3844,9 +3936,9 @@ def render_components(
         anchor = "sec-%d" % (len(sections) + 1)
         toc_entries.append((anchor, num, label))
         return (
-            '<section data-component="%s" id="%s"><h2>%s%s</h2>%s</section>'
+            '<section data-component="%s" id="%s"><h2>%s%s%s</h2>%s</section>'
             % (escape(component, quote=True), escape(anchor, quote=True),
-               num_html, heading, body)
+               num_html, heading, _question_refs(asks), body)
         )
 
     # 2026-08-29（ユーザー要望）：節を一覧で書くと、**順番・見出し・番号・繰り返し**が自由になる。
@@ -3869,7 +3961,13 @@ def render_components(
                 pass
             label = _stringify(entry.get("label", "")) or LABELS.get(component, component)
             sections.append(
-                _one_section(component, body_value, label, _stringify(entry.get("num", "")))
+                _one_section(
+                    component,
+                    body_value,
+                    label,
+                    _stringify(entry.get("num", "")),
+                    entry.get("asks"),
+                )
             )
             emitted.add(component)
     for component in plan.components:
@@ -3996,6 +4094,7 @@ pre.log.diff{{padding:.7rem 0}}pre.log.diff span{{display:block;padding:0 1rem}}
 .pros-cons{{display:block;margin-top:.3rem;font-size:.85rem;line-height:1.7;color:var(--ink-2)}}.pros-cons b{{font:600 .7rem/1.6 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.04em;margin-right:.3rem}}.pros-cons .pro{{color:var(--pass)}}.pros-cons .con{{color:var(--fail)}}
 .choice.has-thumb{{display:grid;grid-template-columns:auto minmax(0,1fr) min(12rem,38%)}}.choice .thumb{{display:block;grid-column:3;width:100%;min-width:0;margin:0;padding:.3rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);line-height:0}}.choice .thumb img,.choice .thumb svg{{display:block;width:100%;height:auto}}.thumb-missing{{display:block;margin-top:.3rem;font-size:.78rem;line-height:1.6;color:var(--warn)}}.choice .thumb.thumb-missing{{grid-column:auto;width:auto;margin:.3rem 0 0;padding:0;border:0;background:transparent;line-height:1.6}}.choice .thumb .thumb-missing{{margin-top:.25rem}}@media(max-width:600px){{.choice.has-thumb{{grid-template-columns:auto minmax(0,1fr)}}.choice .thumb{{grid-column:2;max-width:16rem}}}}
 .q-note{{display:block;width:100%;margin:.4rem 0 0;padding:.45rem .6rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem}}
+.q-ref{{display:inline-block;margin-left:.6rem;padding:.05rem .55rem;border:1px solid var(--accent);border-radius:999px;background:var(--accent-soft);color:var(--accent);font:600 .72rem/1.6 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.03em;text-decoration:none;vertical-align:.2em;white-space:nowrap}}.q-ref:hover,.q-ref:focus-visible{{background:var(--accent);color:var(--on-accent)}}.q-no{{display:inline-block;margin-right:.45rem;padding:0 .4rem;border-radius:2px;background:var(--accent-soft);color:var(--accent);font-weight:700}}fieldset[id^="q-"]{{scroll-margin-top:1.2rem}}fieldset:target{{outline:2px solid var(--accent);outline-offset:6px;border-radius:2px}}
 @media print{{@page{{size:A4;margin:15mm}}#theme-toggle,.copy-btn,#copy-decision{{display:none !important}}.wrap[data-layout="rail"]{{display:block}}.wrap[data-layout="rail"]>.rail{{order:0;position:static;max-height:none;overflow:visible}}.card,.scroll,pre,.dia-wrap,.chart-wrap,details,.img-figure,.compare,.callout-legend{{break-inside:avoid;page-break-inside:avoid}}.t::after{{display:none !important}}.zoom-overlay,.dia-node-tip,.dia-hover-hint{{display:none !important}}}}
 </style>
 </head>

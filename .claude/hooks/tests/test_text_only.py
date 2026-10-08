@@ -1,0 +1,332 @@
+"""文字だけの版（<name>-text.txt）の試験（2026-10-09・試問の費用を下げる Q1）。
+
+何を守るか＝判断の頁の試問は、頁を読むのに掛かる費用が大きい（画像の data: 、図の svg、script、
+style が頁の大半）。そこで頁を組む道具が、画像・図・script・style・釦・回答文の欄を外した
+本文だけの版を、完全版の隣へ書く。試問の読み手にはそれを読ませる。
+外すものは外れ、読む手掛かり（見出し・表の行・選択肢の記号・用語の印・画像の説明）は残ること。
+この試験の手書きの頁は render_components に頼らない（組む側が変わっても、この検査は動く）。
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+HOOKS_DIR = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = HOOKS_DIR.parent / "scripts"
+for _entry in (str(HOOKS_DIR), str(SCRIPTS_DIR)):
+    if _entry not in sys.path:
+        sys.path.insert(0, _entry)
+
+import render_page as rp  # noqa: E402
+
+BIG_IMAGE = "data:image/png;base64," + "QUJD" * 2000
+
+PAGE = (
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>見本の頁</title>"
+    "<style>.x{color:red}.dia{margin:0}</style></head><body>"
+    "<div class=\"wrap\"><header data-component=\"overview\">"
+    "<div class=\"head-row\"><p class=\"eyebrow\">小さい行</p>"
+    "<button id=\"theme-toggle\" type=\"button\">明暗を切り替える</button></div>"
+    "<h1>結論の1文</h1><p class=\"lede\">要点は<span class=\"t\" tabindex=\"0\" data-d=\"説明の文\" "
+    "aria-label=\"語：説明の文\">検品証</span>が通ること。</p></header>"
+    "<main class=\"flow\">"
+    "<section data-component=\"summary\" id=\"sec-1\"><h2><span class=\"sec-no\">零</span>3行でいうと</h2>"
+    "<div class=\"item-row\"><strong class=\"item-label\">Goal</strong>"
+    "<span class=\"item-copy\">目的の文</span></div></section>"
+    "<section data-component=\"visual\" id=\"sec-2\"><h2>図と画像</h2>"
+    "<div class=\"dia-wrap\"><svg class=\"dia\" viewBox=\"0 0 10 10\" role=\"img\" aria-label=\"図の題の代わり\">"
+    "<title>流れの図</title><path d=\"M 0 0 L 5 5\"></path>"
+    "<g><title>用語：箱の説明</title><rect x=\"1\" y=\"1\" width=\"3\" height=\"3\"></rect>"
+    "<text x=\"1\" y=\"1\"><tspan>受け取る</tspan></text>"
+    "<text x=\"1\" y=\"2\"><tspan>調べる</tspan></text></g></svg></div>"
+    "<figure class=\"img-figure\"><div class=\"img-frame\" data-zoom=\"1\">"
+    "<img src=\"" + BIG_IMAGE + "\" alt=\"画面の見本\" width=\"10\" height=\"10\">"
+    "<svg class=\"marks\" viewBox=\"0 0 10 10\"><circle cx=\"1\" cy=\"1\" r=\"2\"></circle>"
+    "<text x=\"1\" y=\"1\">1</text></svg></div>"
+    "<figcaption>図1｜画面の見本｜出所：撮影</figcaption></figure></section>"
+    "<section data-component=\"evidence\" id=\"sec-3\"><h2>根拠</h2>"
+    "<div class=\"scroll\"><table><caption>表の題</caption>"
+    "<thead><tr><th>種類</th><th>内容</th><th>出所</th></tr></thead>"
+    "<tbody><tr><td data-label=\"種類\"><span class=\"src s-m\">実測</span></td>"
+    "<td data-label=\"内容\">試験が合格<br><span class=\"badge b-good\">完了</span></td>"
+    "<td data-label=\"出所\"><code>a/b.py</code></td></tr></tbody></table></div></section>"
+    "<section data-component=\"decision\" id=\"sec-4\"><h2>選ぶこと</h2>"
+    "<fieldset><legend><span class=\"q-no\">Q1</span>配置はどれにするか</legend>"
+    "<label class=\"choice\"><input type=\"radio\" name=\"decision\" data-req=\"1\" data-label=\"案A\" data-rec=\"1\">"
+    "<span><span class=\"badge b-good recommendation\">推奨</span> 案A 左に一覧"
+    "<span class=\"pros-cons\"><b class=\"pro\">利点</b> 速い<br><b class=\"con\">代償</b> 狭い</span></span></label>"
+    "<label class=\"choice\"><input type=\"radio\" name=\"decision\" data-req=\"1\" data-label=\"案B\">"
+    "<span>案B 上に帯</span></label>"
+    "<input type=\"text\" class=\"q-note\" data-q=\"1\" placeholder=\"補足（任意）\" aria-label=\"補足\"></fieldset>"
+    "<fieldset><legend>足すもの</legend><label class=\"choice\"><input type=\"checkbox\" name=\"decision-2\" "
+    "data-req=\"1\" data-label=\"甲\"><span>甲の欄</span></label>"
+    "<label class=\"choice number-row\"><span>巡数</span><input type=\"number\" name=\"decision-number\" "
+    "data-req=\"1\" data-label=\"試問の巡数\"><span class=\"unit\">回</span></label></fieldset>"
+    "<fieldset><legend>自由記述</legend><label class=\"objection-freeform\" for=\"decision-objection\">追加条件</label>"
+    "<textarea id=\"decision-objection\" name=\"objection\" rows=\"4\">下書きの文</textarea></fieldset>"
+    "<pre id=\"decision-prompt\" aria-live=\"polite\">選択してください。</pre>"
+    "<div class=\"decision-actions\"><button id=\"copy-decision\" type=\"button\">依頼文をコピー</button></div>"
+    "</section>"
+    "<section data-component=\"details\" id=\"sec-5\"><h2>詳細</h2><details><summary>折りたたみ</summary>"
+    "<ul><li>一つ目<ul><li>入れ子の二つ目</li></ul></li><li>三つ目</li></ul>"
+    "<blockquote>引用の文</blockquote></details></section>"
+    "</main></div>"
+    "<script>const secret = 'スクリプトの中の文'; if (a < b) { x = '<p>'; }</script>"
+    "</body></html>"
+)
+
+
+def _text(page=PAGE, name="sample"):
+    return rp.text_only(page, name)
+
+
+class WhatIsRemovedTests(unittest.TestCase):
+    def test_no_angle_bracket_and_no_data_uri_remains(self):
+        text = _text()
+
+        self.assertNotIn("<", text)
+        self.assertNotIn(">", text.replace("> 引用の文", ""))
+        self.assertNotIn("data:", text)
+        self.assertNotIn("base64", text)
+
+    def test_script_style_and_buttons_are_gone(self):
+        text = _text()
+
+        self.assertNotIn("スクリプトの中の文", text)
+        self.assertNotIn("color:red", text)
+        self.assertNotIn("明暗を切り替える", text)
+        self.assertNotIn("依頼文をコピー", text)
+
+    def test_the_reply_box_and_the_action_row_are_gone(self):
+        text = _text()
+
+        self.assertNotIn("選択してください。", text)
+
+    def test_explanation_text_of_terms_is_not_carried(self):
+        text = _text()
+
+        self.assertNotIn("説明の文", text)
+        self.assertIn("検品証〔用語〕が通ること", text)
+
+    def test_the_head_and_title_elements_are_not_read(self):
+        text = _text()
+
+        self.assertNotIn("見本の頁", text.replace("元の頁: sample.html", ""))
+
+    def test_much_smaller_than_the_full_page(self):
+        text = _text()
+
+        self.assertLess(len(text.encode("utf-8")) * 3, len(PAGE.encode("utf-8")))
+
+
+class WhatIsKeptTests(unittest.TestCase):
+    def test_header_line_comes_first_and_names_the_original(self):
+        text = _text()
+
+        first = text.splitlines()[0]
+        self.assertEqual(
+            first,
+            "（文字だけの版＝画像・図・script・style を外した本文。〔用語〕はホバーで説明の付く語。"
+            "元の頁: sample.html）",
+        )
+
+    def test_headings_get_hash_marks_and_the_section_number_is_bracketed(self):
+        text = _text()
+
+        self.assertIn("\n# 結論の1文\n", text)
+        self.assertIn("\n## [零] 3行でいうと\n", text)
+        self.assertIn("\n## 選ぶこと\n", text)
+
+    def test_terms_are_marked(self):
+        self.assertIn("検品証〔用語〕", _text())
+
+    def test_item_rows_keep_label_and_copy_on_one_line(self):
+        self.assertIn("\nGoal：目的の文\n", _text())
+
+    def test_svg_keeps_its_title_and_inner_text(self):
+        text = _text()
+
+        self.assertIn("[図: 流れの図｜文字: 受け取る／調べる]", text)
+        self.assertNotIn("箱の説明", text)
+
+    def test_image_keeps_only_its_alt_and_the_marks_numbers(self):
+        text = _text()
+
+        self.assertIn("[画像: 画面の見本]", text)
+        self.assertIn("[画像の印: 1]", text)
+        self.assertIn("図1｜画面の見本｜出所：撮影", text)
+
+    def test_a_table_row_is_one_line_with_cells_joined(self):
+        text = _text()
+
+        self.assertIn("\n種類｜内容｜出所\n", text)
+        self.assertIn("\n実測｜試験が合格 [完了]｜a/b.py\n", text)
+        self.assertIn("\n表の題\n", text)
+
+    def test_choices_use_radio_and_checkbox_marks_and_keep_pros_and_cons_on_the_line(self):
+        text = _text()
+
+        self.assertIn("[Q1] 配置はどれにするか", text)
+        self.assertIn("( ) [推奨] 案A 左に一覧 利点： 速い ／ 代償： 狭い", text)
+        self.assertIn("\n( ) 案B 上に帯\n", text)
+        self.assertIn("[ ] 甲の欄", text)
+
+    def test_number_note_and_free_text_boxes_are_marked(self):
+        text = _text()
+
+        self.assertIn("[補足欄]", text)
+        self.assertIn("[数: 試問の巡数]", text)
+        self.assertIn("[自由記述欄]", text)
+        self.assertNotIn("下書きの文", text)
+
+    def test_nested_lists_and_quotes(self):
+        text = _text()
+
+        self.assertIn("\n- 一つ目\n", text)
+        self.assertIn("\n- 入れ子の二つ目\n", text)
+        self.assertIn("\n- 三つ目\n", text)
+        self.assertIn("\n> 引用の文\n", text)
+        self.assertIn("\n折りたたみ\n", text)
+
+    def test_no_run_of_blank_lines_and_a_single_trailing_newline(self):
+        text = _text()
+
+        self.assertNotIn("\n\n\n", text)
+        self.assertTrue(text.endswith("\n"))
+        self.assertFalse(text.endswith("\n\n"))
+
+    def test_only_lf_line_endings(self):
+        self.assertNotIn("\r", _text())
+
+    def test_a_fragment_without_a_body_tag_still_reads(self):
+        text = rp.text_only("<h2>見出し</h2><p>本文</p>")
+
+        self.assertIn("## 見出し", text)
+        self.assertIn("本文", text)
+        self.assertNotIn("元の頁", text)
+
+    def test_one_br_inside_a_pros_cons_stays_on_the_choice_line(self):
+        page = (
+            '<label><input type="radio"><span>案<span class="pros-cons"><b class="pro">利点</b> 良い<br>'
+            '<b class="con">代償</b> 悪い</span></span></label><label><input type="radio"><span>次</span></label>'
+        )
+
+        text = rp.text_only(page)
+
+        self.assertIn("( ) 案 利点： 良い ／ 代償： 悪い\n( ) 次", text)
+
+    def test_a_bold_label_followed_by_a_span_gets_a_space(self):
+        text = rp.text_only("<div><b>GOAL</b><span>目的</span></div><div><b>NOW</b><span>現在</span></div>")
+
+        self.assertIn("GOAL 目的\nNOW 現在", text)
+
+    def test_text_inside_pre_and_code_is_kept_as_written(self):
+        text = rp.text_only("<pre class=\"log\">一行目\n二行目 a &lt; b</pre><p><code>x.py</code></p>")
+
+        self.assertIn("一行目 二行目 a < b", text)
+        self.assertIn("x.py", text)
+
+
+class FilesAndMainTests(unittest.TestCase):
+    def test_the_text_file_sits_beside_the_page_with_the_text_suffix(self):
+        with tempfile.TemporaryDirectory() as td:
+            full = Path(td) / "my-page.html"
+            full.write_text(PAGE, encoding="utf-8")
+
+            path = rp.write_text_only(str(full))
+
+            self.assertEqual(Path(path), Path(td) / "my-page-text.txt")
+            self.assertEqual(rp.text_path_for(str(full)), path)
+            raw = Path(path).read_bytes()
+            self.assertNotIn(b"\r", raw)
+            body = raw.decode("utf-8")
+            self.assertIn("元の頁: my-page.html", body)
+            self.assertLess(len(raw), full.stat().st_size)
+
+    def test_main_writes_a_text_file_next_to_the_page_and_names_it_in_the_output(self):
+        spec = {
+            "name": "text-only-check",
+            "title": "文字だけの版の確認",
+            "components": list(rp.ALL_COMPONENTS),
+            "reasons": ["project_novice_default"],
+            "publish": "never",
+            "content": {
+                "overview": "文字だけの版の確認用の頁である。",
+                "summary": "Goal：確かめる。\nNow：試験中である。",
+                "walkthrough": "手順一：試験のための本文である。",
+                "examples": "例一：試験のための本文である。",
+                "progress": "現在地：試験中である。",
+                "visual": "図の見本：試験のための本文である。",
+                "decision": {"groups": [{"legend": "進め方", "kind": "radio", "options": [
+                    {"label": "案A", "recommended": True, "pros": "速い"},
+                    {"label": "案B", "pros": "丁寧"},
+                ]}]},
+                "evidence": "実測：試験のための値である｜.claude/hooks/tests/test_text_only.py",
+                "glossary": "用語一：試験のための説明である。",
+                "details": "記録：試験のための詳細である。",
+            },
+        }
+        fake_smoke = types.SimpleNamespace(status="pass", errors=(), metrics={})
+        with tempfile.TemporaryDirectory() as td:
+            spec_path = Path(td) / "spec.json"
+            spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+            out_root = Path(td) / "root"
+            buffer = io.StringIO()
+            with patch.object(rp, "run_visual_smoke", return_value=fake_smoke), \
+                 patch.object(rp, "_approved_root_for", return_value=str(out_root)), \
+                 contextlib.redirect_stdout(buffer):
+                code = rp.main(["render_page.py", str(spec_path)])
+            names = sorted(item.name for item in out_root.iterdir())
+            text_file = out_root / "text-only-check-text.txt"
+            full_size = (out_root / "text-only-check.html").stat().st_size
+            body = text_file.read_text(encoding="utf-8")
+            text_size = text_file.stat().st_size
+            self.assertIn(str(text_file), buffer.getvalue())
+
+        self.assertIn(code, (0, 1))
+        self.assertEqual(names, ["text-only-check-artifact.html", "text-only-check-text.txt", "text-only-check.html"])
+        self.assertIn("  文字だけの版 (試問用): ", buffer.getvalue())
+        self.assertLess(text_size, full_size)
+        self.assertIn("## 選ぶこと", body)
+        self.assertIn("( ) [推奨] 案A", body)
+        self.assertNotIn("<script", body)
+        self.assertNotIn("<", body)
+
+    def test_a_failed_write_does_not_stop_the_page_and_is_reported(self):
+        spec = {
+            "name": "text-only-failed",
+            "title": "書けなかったときの確認",
+            "components": ["overview"],
+            "reasons": ["project_novice_default"],
+            "publish": "never",
+            "content": {"overview": "書けなかったときの確認用の頁である。"},
+        }
+        fake_smoke = types.SimpleNamespace(status="pass", errors=(), metrics={})
+        with tempfile.TemporaryDirectory() as td:
+            spec_path = Path(td) / "spec.json"
+            spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+            out_root = Path(td) / "root"
+            buffer = io.StringIO()
+            with patch.object(rp, "run_visual_smoke", return_value=fake_smoke), \
+                 patch.object(rp, "_approved_root_for", return_value=str(out_root)), \
+                 patch.object(rp, "write_text_only", side_effect=OSError("書き込めない")), \
+                 contextlib.redirect_stdout(buffer):
+                code = rp.main(["render_page.py", str(spec_path)])
+            built = (out_root / "text-only-failed.html").is_file()
+
+        out = buffer.getvalue()
+        self.assertIn(code, (0, 1))
+        self.assertTrue(built)
+        self.assertIn("ⓘ 文字だけの版は書けなかった（書き込めない）", out)
+        self.assertNotIn("文字だけの版 (試問用)", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
