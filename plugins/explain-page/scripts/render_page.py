@@ -94,6 +94,15 @@
     "steps": [{"title":"…","text":"…"}] か「題：本文」の一覧（横並びの番号つき手順）
     "chips": 語の一覧か [{"title":"…","items":[…],"note":"…"}]（短い語の札の束・数は自動）
     content の "headline" は h1 を結論の1文にする（短い題は上の小さい行へ・<title> は題のまま）
+  - 2026-10-08（判断の頁を赤ペン流に寄せた）：判断の選択肢（"decision" の groups の options の辞書）は
+    "pros":"利点"（配列なら「／」で結合）・"cons":"代償"・"thumb" を受ける。
+    ⚠️非推奨の選択肢に利点が無い問いは、組む前に「実質1択の恐れ」と警告する（止めはしない）。
+    "pros"：その案を選ぶ利点。推奨でない案にも1行書く（why に「利点：」と書いても同じ扱い）
+    "cons"：その案の代償。選ぶと何を諦めるか
+    "thumb"：選択肢の小さな絵＝{"svg":"<svg…>"}（許可リストで組み直す）か
+      {"path":"…png","alt":"…","crop":[…]}（画像）。文字列なら「<svg」で始まれば svg・他は画像の path
+    頁の定義の上の段の "preflight":{"reader":"読者宣言の1行","allowed":["語",…]} は、
+    判断の頁（reasons に decision_required）で出す試問の文に使う（無ければ既定の読者・許可語なし）
   - 側柱の {"heading": "用語", "glossary": true} は、本文の用語ホバーのうち
     **本文で2回以上現れた語だけ**を正本の説明で並べる（1語も無ければ塊ごと出さない）
 
@@ -114,6 +123,7 @@ import io
 import json
 import os
 import sys
+from collections.abc import Mapping
 
 NL = chr(10)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -135,6 +145,7 @@ from visual.receipts import (  # noqa: E402
     external_dependency_reason,
     validate_receipt,
 )
+from visual.render_components import LABELS as COMPONENT_LABELS  # noqa: E402
 from visual.render_components import render_components  # noqa: E402
 from visual.section_labels import check_sections  # noqa: E402
 from visual.state import StateStore  # noqa: E402
@@ -585,6 +596,215 @@ def advise_density(counts, body_bytes):
     return lines
 
 
+# 2026-10-08（判断の頁を赤ペン流に寄せた・案1）：実質1択の恐れを、組む前に知らせる。
+# ⚠️止めない＝選択肢に利点があるかどうかの意味は機械には決められない。
+#   ここで見るのは「推奨があるのに、推奨でない案に利点の欄も「利点」の語も無い」という形だけ。
+#   利用者の実際の定義は利点／代償を why の中に「利点：…／代償：…」で書いているので、
+#   why に「利点」を含む案は警告しない（pros が無くても書いた扱い）。
+WARNING_LIMIT = 10
+WARNING_NAME_WIDTH = 30
+
+
+def _has_text(value):
+    """文字列か文字列の配列に、空白以外の字が1つでもあるか。"""
+    if isinstance(value, (list, tuple)):
+        return any(_has_text(item) for item in value)
+    return value is not None and bool(str(value).strip())
+
+
+def _short(value):
+    """警告の文に入れる名前。改行を畳み、長ければ切る。"""
+    text = " ".join(str(value if value is not None else "").split())
+    if len(text) > WARNING_NAME_WIDTH:
+        return text[:WARNING_NAME_WIDTH - 1] + "…"
+    return text
+
+
+def _decision_bodies(content):
+    """頁に出る判断の中身を、頁の文書順で返す（render_components の節の組み方に合わせる）。
+
+    節の一覧（sections）に component が decision の節があればその content（無ければ
+    content の "decision"）を順に、一覧に無ければ content の "decision" を1つ。
+    """
+    bodies = []
+    emitted = False
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if not isinstance(entry, Mapping):
+                continue
+            if str(entry.get("component", "")).strip() != "decision":
+                continue
+            body = entry.get("content")
+            if body is None:
+                body = content.get("decision")
+            if body is None:
+                continue
+            bodies.append(body)
+            emitted = True
+    if not emitted and content.get("decision") is not None:
+        bodies.append(content["decision"])
+    return bodies
+
+
+def _decision_groups(value):
+    """判断の中身を群の一覧に直す。⚠️render_components._decision_block と同じ規則
+    （groups／旧形式の options・multi・numbers／配列・単独の値）。"""
+    groups = []
+    if isinstance(value, Mapping):
+        raw_groups = value.get("groups")
+        if isinstance(raw_groups, (list, tuple)) and raw_groups:
+            groups = list(raw_groups)
+        else:
+            options = value.get("options", ())
+            if not isinstance(options, (list, tuple)):
+                options = (options,)
+            if options:
+                groups.append({"legend": "選択肢",
+                               "kind": "checkbox" if value.get("multi") else "radio",
+                               "options": list(options)})
+            numbers = value.get("numbers", ())
+            if isinstance(numbers, (list, tuple)) and numbers:
+                groups.append({"legend": "数を入れる", "kind": "number", "options": list(numbers)})
+    elif isinstance(value, (list, tuple)):
+        groups = [{"legend": "選択肢", "kind": "radio", "options": list(value)}]
+    else:
+        groups = [{"legend": "選択肢", "kind": "radio", "options": [value]}]
+    return [
+        group if isinstance(group, Mapping)
+        else {"legend": "選択肢", "kind": "radio", "options": [group]}
+        for group in groups
+    ]
+
+
+def decision_option_warnings(content):
+    """判断の問いが実質1択になっていないかを見て、警告の行の一覧を返す（空なら問題なし）。
+
+    入れるもの＝頁の定義の content。見る場所＝content["decision"]（groups か旧形式の
+    options）と、content["sections"] のうち component が decision の節の content。
+    対象＝kind が radio／checkbox（既定 radio）の群のうち、辞書の選択肢に recommended が
+    真のものが1つでもある群。その群の recommended でない選択肢で、pros が空で、
+    かつ why に「利点」を含まないものを1行ずつ（文字列の選択肢は利点を書けないので必ず数える）。
+    選択肢が2つ以上あって全部が文字列の群は、群ごとに1行（推奨の印も利点も付かない形）。
+    scale・number・free は対象外。
+    ⚠️2026-10-08（リード）：計画では文字列だけの群を対象外にしていたが、置き場の定義47本を
+      測ると選択の群78のうち76が文字列だけで、警告が1件も出ない＝案1が効かない形だった。
+      文字列の選択肢は render_components._decision_parts で推奨にならない（「推奨を入れる」の
+      釦も効かない）ので、辞書の形へ寄せる指摘として数える。止めはしない。
+    ⚠️問いの番号 Q は頁全体の通し（free の群は数えない＝回答文の番号と同じ）。
+    10行で打ち切り、残りは「ほかN件」の1行にまとめる。
+    """
+    lines = []
+    number = 0
+    for body in _decision_bodies(content):
+        for group in _decision_groups(body):
+            kind = (str(group.get("kind", "radio") or "radio")).lower()
+            if kind == "free":
+                continue
+            number += 1
+            if kind in ("scale", "number"):
+                continue
+            options = group.get("options", ())
+            if not isinstance(options, (list, tuple)):
+                continue
+            dicts = [o for o in options if isinstance(o, Mapping)]
+            if len(options) >= 2 and not dicts:
+                lines.append(
+                    "⚠️選択肢が文字だけ（止めはしない）: Q%d「%s」＝推奨の印も利点も付かない"
+                    "＝label・recommended・pros・cons の辞書で書く"
+                    % (number, _short(group.get("legend", "選択肢")))
+                )
+                continue
+            if not any(bool(o.get("recommended")) for o in dicts):
+                continue
+            for option in options:
+                if isinstance(option, Mapping):
+                    if bool(option.get("recommended")):
+                        continue
+                    if _has_text(option.get("pros")) or "利点" in str(option.get("why", "") or ""):
+                        continue
+                    label = option.get("label", "")
+                else:
+                    label = option
+                lines.append(
+                    "⚠️実質1択の恐れ（止めはしない）: Q%d「%s」の「%s」に利点（pros）が無い"
+                    "＝非推奨でも選ぶ理由を1行書く"
+                    % (number, _short(group.get("legend", "選択肢")), _short(label))
+                )
+    if len(lines) > WARNING_LIMIT:
+        rest = len(lines) - WARNING_LIMIT
+        lines = lines[:WARNING_LIMIT] + ["   ほか%d件" % rest]
+    return lines
+
+
+# 2026-10-08（判断の頁を赤ペン流に寄せた・案5）：判断の頁だけ、人に見せる前に
+# 文脈ゼロのサブエージェントに読ませる試問の文を出す。
+# ⚠️判断の頁（reasons に decision_required）以外では出さない＝毎回の費用を判断の回に限る。
+# ⚠️節の見出しはレンダラーが実際に出す文字に合わせる（LABELS と、節の一覧で自分で付けた見出し）。
+PREFLIGHT_DEFAULT_READER = "このプロジェクトを初めて読む人"
+
+
+def _heading_text(spec, component):
+    """頁に実際に出る節の見出しを「」で囲んで返す（節が複数ならそれぞれ）。"""
+    default = COMPONENT_LABELS.get(component, component)
+    labels = []
+    content = spec.get("content")
+    sections = content.get("sections") if isinstance(content, Mapping) else None
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if isinstance(entry, Mapping) and str(entry.get("component", "")).strip() == component:
+                label = str(entry.get("label", "") or "").strip() or default
+                if label not in labels:
+                    labels.append(label)
+    return "".join("「%s」" % label for label in (labels or [default]))
+
+
+def preflight_prompt(spec, page_path):
+    """判断の頁の試問の文を返す（貼り付け用の本文は「ここから」〜「ここまで」の間）。
+
+    入れるもの＝頁の定義と、組んだ完全版の頁のpath。任意の spec["preflight"] は
+    {"reader":"読者宣言の1行","allowed":["語",…]}（無ければ既定の読者・許可語なし）。
+    """
+    preflight = spec.get("preflight")
+    preflight = preflight if isinstance(preflight, Mapping) else {}
+    reader = str(preflight.get("reader", "") or "").strip().rstrip("。") or PREFLIGHT_DEFAULT_READER
+    allowed = preflight.get("allowed")
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    allowed = [str(word).strip() for word in (allowed or ()) if str(word).strip()]
+    allowed_text = ("は " + "、".join(allowed) + " だけ") if allowed else "は無い"
+    decision = _heading_text(spec, "decision")
+    evidence = _heading_text(spec, "evidence")
+    glossary = _heading_text(spec, "glossary")
+    return NL.join([
+        "[試問] この頁は判断を求める（reasons に decision_required）＝人に見せる前に、"
+        "下の文を文脈ゼロのサブエージェント（Claude Code なら general-purpose）にそのまま渡し、"
+        "同期で結果を待つ（background にしない・結果を読まずに応答を終えない）。"
+        "1〜3 で落ちた問いは絵を足す／問いを落とす／言い換える。4 は文をほどく。"
+        "5 が3語以上なら言い換える。計2巡で打ち切る。"
+        "上の合格が False の頁は先に直す。サブエージェントを使えない環境では省き、省いたと応答に1行書く。",
+        "---- ここから ----",
+        "次の HTML は、人に判断を求める頁です。"
+        "あなたは何も知らない読者として読み、5 つの問いに答えてください。",
+        "頁: %s（Read で開く）" % page_path,
+        "読者宣言: %s。説明なしで使ってよい語%s（頁の%sの節とホバーで説明の付いた語は除く）"
+        % (reader, allowed_text, glossary),
+        "1. %sの節の各問について、それぞれの選択肢を選んだ場合に何が変わるかを、"
+        "この頁だけから説明してください。説明できない問いは「説明不能」と書いてください。"
+        "続けて、%sの節の入力欄だけを見て（上の本文を見ずに）、各選択肢の違いが分かるか答えてください。"
+        "見た目が違うのに絵が無い選択肢があれば、その問いを挙げてください。" % (decision, decision),
+        "2. 頁の断定（本文・判定・推奨）に、%sの節の表の行が対応していますか。"
+        "対応する行が無い断定を挙げてください。" % evidence,
+        "3. 推奨でない選択肢を選ぶ理由（利点）が読み取れますか。"
+        "読み取れない問いを挙げてください（その問いは実質1択です）。",
+        "4. 音読して不自然な文、意味の取れない文を逐語で挙げてください。"
+        "次に、この頁の趣旨を 30 秒で 3 文で言ってください。",
+        "5. 読者宣言の許可語の外で、説明なしに使われている語や初見の造語を列挙してください。",
+        "出力は問いごとに「通過 / 落ちた問いと理由」で。頁を直す提案は不要です。",
+        "---- ここまで ----",
+    ])
+
+
 def _parse_argv(argv):
     """位置引数（定義JSONのpath）と任意の --runtime／--state-path／--project-root を取り出す。
 
@@ -654,6 +874,13 @@ def main(argv):
         for problem in problems:
             print("   ・" + problem)
         return 2
+    # 2026-10-08（判断の頁を赤ペン流に寄せた・案1）：推奨があるのに非推奨の案に利点が無い問いを知らせる。
+    # ⚠️止めない（知らせるだけ）。この検査の不具合で頁が組めなくならないよう、落ちても続ける。
+    try:
+        for warning in decision_option_warnings(spec["content"]):
+            print(warning)
+    except Exception as exc:  # noqa: BLE001 - 助言の検査なので頁の組み立てを止めない
+        print("ⓘ 実質1択の検査は走らなかった（%s）" % exc)
     full, shaped = build(spec, project_root)
     lines = ["書き出した:", "  完全版 (検品証用): " + full, "  器用 (publish用) : " + shaped, ""]
     bad = 0
@@ -690,6 +917,13 @@ def main(argv):
             lines.append("   ・" + item)
     lines.append("")
     lines.append("⚠️publish には**器用**のほうを渡す（完全版はそのまま渡すと入れ子になる）")
+    # 2026-10-08（判断の頁を赤ペン流に寄せた・案5）：判断を求める頁の回だけ、試問の文を出す。
+    if "decision_required" in tuple(spec.get("reasons", ()) or ()):
+        lines.append("")
+        try:
+            lines.append(preflight_prompt(spec, full))
+        except Exception as exc:  # noqa: BLE001 - 助言なので頁の組み立ての結果は変えない
+            lines.append("ⓘ 試問の文は組めなかった（%s）" % exc)
     # 2026-09-25：--runtime codex の時だけ、完全版について検品の記録を1件残す。
     # ⚠️安全の掟＝--runtime codex が無い（既定 none）ときは、この分岐そのものに入らない
     #   ＝環境変数だけを見て自動で記録することはしない。

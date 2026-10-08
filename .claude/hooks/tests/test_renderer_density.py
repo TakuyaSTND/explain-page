@@ -188,7 +188,8 @@ class ObjectionReasonTests(unittest.TestCase):
         self.assertIn('aria-label="判定1 の理由"', html)
         # 依頼文の組み立てが理由を拾う
         self.assertIn("obj-why", html)
-        self.assertIn("この判定は違う。理由＝", html)
+        # 2026-10-08：回答文の固定形に合わせ、異議の行は「異議. 対象: 理由」になった。
+        self.assertIn("'異議. '", html)
 
     def test_whole_page_still_passes_the_inspector(self):
         html = render_components(

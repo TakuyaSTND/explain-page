@@ -334,8 +334,13 @@ class StateStore:
         project_hash: str,
         session_id: str = "",
         now: float | None = None,
+        since: float | None = None,
     ) -> tuple[tuple[str, str], ...]:
-        """見送った記録を新しい順に (path, reason) で返す。session_id を渡すとそのセッションだけ。"""
+        """見送った記録を新しい順に (path, reason) で返す。
+
+        session_id を渡すとそのセッションだけ。since（epoch 秒）を渡すとそれ以後に残した分だけ
+        ＝「この回の見送り」を回の開始時刻で切り出すのに使う（2026-10-08）。
+        """
         current = time.time() if now is None else now
         query = (
             "SELECT path, reason FROM receipt_skips "
@@ -345,6 +350,9 @@ class StateStore:
         if session_id:
             query += " AND session_id = ?"
             params.append(session_id)
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(float(since))
         query += " ORDER BY id DESC"
         with closing(self._connect()) as connection:
             rows = connection.execute(query, params).fetchall()
@@ -718,6 +726,39 @@ class StateStore:
             publish_policy=str(row[7]),
             deprecated_aliases=_json_tuple(row[8]),
         )
+
+    def load_plan_created_at(
+        self,
+        *,
+        runtime: str,
+        project_hash: str,
+        session_id: str,
+        turn_id: str,
+        now: float | None = None,
+    ) -> float | None:
+        """その回の「依頼を受けた時刻」（予告の計画を保存した epoch 秒）を返す。無い・期限切れは None。
+
+        2026-10-08：回の開始時刻は保存してあった（preflight_plans.created_at）のに、読む口が
+        無かった。回答集めのシート（sheets.py）を「この回に書かれたもの」だけに絞るのに使う。
+        ⚠️load_plan の返り値（ExplanationPlan）は変えない＝別の口として足した。
+        """
+        current = time.time() if now is None else now
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT created_at
+                FROM preflight_plans
+                WHERE runtime=? AND project_hash=? AND session_id=? AND turn_id=?
+                  AND expires_at > ?
+                """,
+                (runtime, project_hash, session_id, turn_id, current),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return float(row[0])
+        except (TypeError, ValueError):
+            return None
 
     def claim_response(
         self,

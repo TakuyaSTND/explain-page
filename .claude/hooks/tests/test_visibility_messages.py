@@ -170,7 +170,7 @@ class QaToolLineFollowsBrandingTests(unittest.TestCase):
     def test_a_named_qa_tool_is_mentioned(self):
         directive = self._directive_with("some-qa-tool")
         self.assertIn("some-qa-tool", directive)
-        self.assertIn("尋問の回答集めだけ", directive)
+        self.assertIn("回答集めのシートだけ", directive)
 
 
 if __name__ == "__main__":

@@ -98,7 +98,8 @@ class ComponentRendererTests(unittest.TestCase):
 
         self.assertIn('name="objection"', html)
         self.assertIn("これは違う", html)
-        self.assertIn("この判定は違う。理由＝", html)
+        # 2026-10-08：回答文の固定形に合わせ、異議の行は「異議. 対象: 理由」になった。
+        self.assertIn("'異議. '", html)
 
     def test_decision_has_select_all_fallback(self):
         plan = ExplanationPlan(

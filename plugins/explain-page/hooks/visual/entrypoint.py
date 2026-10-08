@@ -16,6 +16,7 @@ from . import branding
 from .instructions import compile_directive, compile_stop_reminder
 from .policy import Policy
 from .receipts import build_receipt, describe_skip, receipt_problems, validate_receipt
+from .sheets import answer_sheet_kind_of_path, is_under, sheets_written_since
 from .state import StateStore
 from .subagents import digest_from_payload, is_unattributed
 from .turn_marker import write_turn_marker
@@ -223,6 +224,22 @@ def _describe_shape(
     return " ／ 中身を見た: " + " / ".join(parts)
 
 
+def _sheet_home(local_artifact_root: Any) -> str:
+    """赤ペンのシートを置く場所（承認済みの置き場の下の akapen/）を、画面に出せる1つの文字にする。"""
+    if local_artifact_root is None or not str(local_artifact_root):
+        return "<置き場>" + os.sep + "akapen" + os.sep
+    return str(Path(local_artifact_root) / "akapen") + os.sep
+
+
+def _sheet_names(found: tuple[tuple[str, str], ...]) -> str:
+    """見つかったシートを「種類: ファイル名」の1つの文字にする（2件目以降は件数だけ）。"""
+    first_path, first_kind = found[0]
+    text = "%s: %s" % (first_kind, os.path.basename(first_path))
+    if len(found) > 1:
+        text += " ほか%d件" % (len(found) - 1)
+    return text
+
+
 def _readability_hits_from_text(text: str, rules_path: Any) -> tuple[Any, ...]:
     """本文（すでにcode/pre除去済み想定でなくても良い＝ここでstrip_codeを掛ける）に
     読みやすさ規則を掛け、当たり（Hit）を返す。返せない・規則が無ければ空タプル。
@@ -355,6 +372,26 @@ def handle_event(
         raw_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("url")
         if not isinstance(raw_path, str) or not raw_path.lower().endswith(".html"):
             return {}
+        # 2026-10-08（ユーザー裁定＝2026-09-01 の裁定を反転）：回答集めのシート（赤ペン akapen・
+        # 尋問 grilling-viz）は検品の対象にしない。部品の目印を持たないのが正しい形なので、
+        # 検品に掛けても落ちるだけだった（外部のURLの判定で検品証が作れず、見送りの記録まで残った）。
+        # ⚠️承認済みの置き場の中だけ＝検品証も見送りの記録も作らず、1行を返して終える。
+        #   置き場の外のシートは従来の見送りの経路のまま（説明に書き場所の案内を足す）。
+        sheet_kind = answer_sheet_kind_of_path(raw_path)
+        if sheet_kind and is_under(raw_path, local_artifact_root):
+            sheet_note = (
+                "[回答集めのシート] %s のHTMLは検品の対象外（承認済みの置き場の中）"
+                "＝この回にレンダラーの頁が無ければ停止で差し戻さない" % sheet_kind
+            )
+            if runtime == "hermes":
+                return {"message": sheet_note}
+            return {
+                "systemMessage": sheet_note,
+                "hookSpecificOutput": {
+                    "hookEventName": envelope.event,
+                    "additionalContext": sheet_note,
+                },
+            }
         glossary, glossary_entries = load_glossary_snapshot(*glossary_paths)
         saved_plan = state_store.load_plan(
             runtime=runtime,
@@ -404,6 +441,12 @@ def handle_event(
             # fail-open と同じ「失敗が沈黙として現れる」型なので、①数えられる場所に残し
             # ②その場でも文字にして返す。⚠️止めはしない＝作業は続行できる。
             note = describe_skip(raw_path, exc, local_artifact_root)
+            if sheet_kind:
+                # 置き場の外に書いた回答集めのシート＝書き場所を案内する（止めはしない）。
+                note += (
+                    " ／ 回答集めのシート（%s）＝承認済みの置き場（%s 等）の下に書けば差し戻されない"
+                    % (sheet_kind, _sheet_home(local_artifact_root))
+                )
             state_store.save_receipt_skip(
                 runtime=envelope.runtime,
                 project_hash=project_key,
@@ -504,6 +547,38 @@ def handle_event(
             )
             for receipt in receipts
         )
+    # 2026-10-08（ユーザー裁定＝2026-09-01 の裁定を反転）：**回答集めのシートだけの回は
+    # 差し戻さない**。シート（赤ペン akapen・尋問 grilling-viz）は人に答えてもらう入力票で、
+    # 部品の目印を持たない＝検品証にならない。報告の頁を足す動機にならなかった（sheets.py）。
+    # 免除する条件は全部そろったときだけ（1つでも欠ければ従来どおり差し戻す＝fail-closed）：
+    #   ・頁が要る回なのに、この回の検品証が1件も無い（落ちた頁を出した回は免除しない）
+    #   ・依頼時の計画があり、その時刻（＝回の開始）より後に承認済みの置き場の下へ書かれたシートがある
+    #     ＝シェルで書いたシートも拾う（PostToolUse の matcher に Bash が無い）
+    #   ・この回に置き場の外へ書いて見送られた頁が無い（報告の頁を外に逃がす穴を塞ぐ）
+    sheet_only_turn = False
+    sheets_found: tuple[tuple[str, str], ...] = ()
+    if (
+        not receipt_is_valid
+        and not receipts
+        and state_store is not None
+        and local_artifact_root is not None
+        and plan.delivery == "local_html"
+        and envelope.turn_has_tool_use
+    ):
+        started = state_store.load_plan_created_at(
+            runtime=runtime,
+            project_hash=project_key,
+            session_id=envelope.session_id,
+            turn_id=envelope.turn_id,
+        )
+        if started is not None:
+            sheets_found = sheets_written_since(local_artifact_root, started)
+            if sheets_found and not state_store.load_receipt_skips(
+                project_hash=project_key,
+                session_id=envelope.session_id,
+                since=started - 2.0,
+            ):
+                sheet_only_turn = True
     # 2026-09-08：読みやすさ関門（否定側の言い回し）。response_textは長い転写の末尾から
     #   組み立てられるため、古い・別ターンの断片が残っている可能性がある（既知の課題）。
     #   ⚠️shadowはここでblockを新設しない（数えて知らせるだけ）＝enforceだけが下の早期
@@ -516,6 +591,7 @@ def handle_event(
     if (
         plan.delivery != "local_html"
         or receipt_is_valid
+        or sheet_only_turn
         # 2026-08-28（ユーザー委任＝claims/claude-code-hook-noop-20260828.md）：
         # **作業の実体が無いターンは検品証を要求しない**＝通知への応答・現状維持の確認のような、
         # ターン内に tool_use が1つも無い応答にまで頁の再公開を強いない。
@@ -528,6 +604,14 @@ def handle_event(
             if runtime == "hermes":
                 return {"action": "continue", "message": reason}
             return {"decision": "block", "reason": reason}
+        if sheet_only_turn and runtime != "hermes":
+            # 差し戻さないが、沈黙にもしない（何が免除されたかを1行で見せる）。
+            # ⚠️Hermes の pre_verify で message だけを返したときの扱いは未確認＝何も返さない
+            #   （続行の指示と読まれると、免除したのに押し戻す逆の結果になる）。
+            return {
+                "systemMessage": "[sheet_only_turn] 回答集めのシートだけの回＝差し戻さない（%s）"
+                % _sheet_names(sheets_found)
+            }
         return {}
     if state_store is not None and not state_store.claim_response(
         runtime=runtime,
@@ -582,9 +666,12 @@ def handle_event(
             if problems:
                 line += "いちばん新しい頁の理由＝" + "／".join(problems[:3]) + "。"
         if qa_tool:
+            # 2026-10-08：シートだけの回は差し戻さない（裁定の反転）。ただし報告と判断の頁も出した回は
+            #   その頁が通る必要がある＝この行が出るのは「検品証はあるのに通らない」回だけ。
             line += (
-                "⚠️尋問の回答集め（" + qa_tool + "）のHTMLは部品の目印を持たないので検品証にならない"
-                "＝報告と判断の頁を別にレンダラーで作る。"
+                "⚠️回答集めのシート（" + qa_tool + "／赤ペン）のHTMLは検品証にならない"
+                "＝シートだけの回は差し戻さないが、報告と判断の頁も出した回はその頁が通る必要がある。"
+                "報告と判断の頁を別にレンダラーで作る。"
             )
         else:
             line += "報告と判断の頁を別にレンダラーで作る。"
@@ -593,6 +680,8 @@ def handle_event(
         reason += chr(10) + (
             "[receipt_missing] このターンに検品証が1件も無い"
             "（頁を公開していない、または承認済みの置き場の外に書いた）。"
+            "回答集めのシートだけの回なら、シートを承認済みの置き場の下"
+            "（akapen は " + _sheet_home(local_artifact_root) + "）に書けば差し戻されない。"
         )
     if readability_hits:
         # すでにblockするこのターンに、読みやすさの当たりを併記する（shadow/enforceどちらでも

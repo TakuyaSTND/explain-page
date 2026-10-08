@@ -169,7 +169,12 @@ const { chromium } = require(playwrightPath);
           pageErrors.push('decision-controls-missing');
         } else {
           await radio.check();
-          decisionUpdated = !(await prompt.textContent() || '').includes('選択してください');
+          // 2026-10-08：回答文は初期表示から「(未選択 = お任せ…)」の固定形になった（初期文で判定できない）。
+          // ∴押した選択肢の文が回答文に入ったかで見る（script が死ねば初期のまま＝落ちる）。
+          const pickedLabel = (await radio.getAttribute('data-label')) || '';
+          const promptAfterPick = (await prompt.textContent()) || '';
+          decisionUpdated = !promptAfterPick.includes('選択してください')
+            && (!pickedLabel || promptAfterPick.includes(pickedLabel));
           if (!decisionUpdated) pageErrors.push('decision-prompt-not-updated');
 
           const objectionText = page.locator('textarea[name=objection],textarea#decision-objection').first();
@@ -180,7 +185,8 @@ const { chromium } = require(playwrightPath);
             objectionUpdated = (await prompt.textContent() || '').includes('追加条件');
           } else if (await objectionCheck.count()) {
             await objectionCheck.check();
-            objectionUpdated = (await prompt.textContent() || '').includes('これは違う');
+            const promptAfterObjection = (await prompt.textContent()) || '';
+            objectionUpdated = promptAfterObjection.includes('異議.') || promptAfterObjection.includes('これは違う');
           } else {
             objectionUpdated = false;
           }

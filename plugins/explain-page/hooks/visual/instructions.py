@@ -68,10 +68,12 @@ def _renderer_line(render_page_path: str | None = None) -> str:
     # 2026-09-26：回答集めの道具（branding.QA_PAGE_TOOL に名前を持つもの）は利用者の機械ごとの道具
     #   ＝公開版（branding.QA_PAGE_TOOL が None）では、この例外の文を出さない。
     qa_tool = getattr(branding, "QA_PAGE_TOOL", None)
+    # 2026-10-08：赤ペン（akapen）の回答集めのシートも同じ扱い＝尋問の `qa_tool` と並べて書く。
+    #   シートは承認済みの置き場の中（akapen は下の akapen/）に書き、検品証は取らない。
     exception = (
-        "⚠️例外は**尋問の回答集めだけ**＝それは `" + qa_tool + "` で"
-        "作り、承認済みの置き場（`" + approved_root + "`）に書く。その出力は検品証を取らない"
-        "（部品の目印が無いので検査は通らない＝それでよい）。"
+        "⚠️例外は**回答集めのシートだけ**＝尋問は `" + qa_tool + "`、赤ペン（akapen）は `"
+        + approved_root + "/akapen/` に書く（どちらも承認済みの置き場の中）。その出力は検品証を取らない"
+        "（部品の目印が無い＝それでよい。シートだけの回は差し戻さない）。"
     ) if qa_tool else ""
     return (
     "頁は手書きしない＝`" + tool + "` に定義JSONを渡して組む"
@@ -88,7 +90,7 @@ def _renderer_line(render_page_path: str | None = None) -> str:
     "／`compare`（前後の切り替え）／`callouts`（番号付き吹き出しの凡例）／`diagram_text`（1行記法 `A -> B : 条件` から図）"
     "／`table` の `heat`・`bars`（列の色付けと行内の棒）・`stack`（「62,3,0」を内訳の積み上げ棒に）・`frac`（分母を薄く）・`groups`（行の区切り）・`row_head`、セルの改行の後は小さい注記／`stats`（大きい数字）／`steps`（横並びの手順）／`chips`（短い語の札）／`diagram` の箱に `icon`（線画の記号）、"
     "文中は `[[good:…]]` の色札・`[[pin:3]]`（画像の点の番号と同じ印）・`==強調==`・`**太字**`・`` `コード` ``。"
-    "判断は `groups`（radio／checkbox／scale／number／free）で組む。"
+    "判断は `groups`（radio／checkbox／scale／number／free）で組み、選択肢に `pros`・`cons`（非推奨にも利点）と `thumb`（svg か画像の path）を添える。"
     "⚠️出所を書けない主張は根拠欄（`evidence`）の外に置かない"
     "＝断定を本文に書いたら、対応する行を「種類：内容｜どこで確かめたか」で必ず足す。"
 )
@@ -100,6 +102,14 @@ def _renderer_line(render_page_path: str | None = None) -> str:
 CODEX_RENDERER_LINE = (
     "頁は render_page.py に --runtime codex を付けて組む"
     "（Codexには公開の道具が無いので、道具が検品の記録を代わりに書く）。"
+)
+
+# 2026-10-08：判断を求める頁（reasons に decision_required）の回にだけ出す1行。
+#   試問の文そのものは render_page.py が組み上がりの出力に付ける（頁のパスと読者宣言が要るため）。
+#   ⚠️どの実行環境でも通じる言い方にする（サブエージェントが無い環境では省いてよい）。
+PREFLIGHT_LINE = (
+    "[試問] 判断の頁は、道具が出す試問の文を文脈ゼロのサブエージェントに"
+    "同期で渡し、直してから見せる（使えなければ省く）。"
 )
 
 # 2026-09-08：ja-text-communication（mathbullet/skills, MIT）のうち、
@@ -224,6 +234,9 @@ def compile_directive(
         # （指示文の前のほう＝実測で効く場所）。Claude・Hermesには出さない。
         if runtime == "codex":
             lines.append(CODEX_RENDERER_LINE)
+        # 2026-10-08：判断を求める頁の回だけ。決定でない頁・Markdownの回には出さない。
+        if "decision_required" in plan.reason_codes:
+            lines.append(PREFLIGHT_LINE)
     # readability（B1/B2/B4/C2/C3/E7）は delivery を問わず常に出す＝
     # Markdownの地の文にも同じ書き方の規律をかける。
     lines.append(f"[readability] {READABILITY_BODY}")
