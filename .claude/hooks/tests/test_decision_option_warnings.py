@@ -313,5 +313,97 @@ class ReachesTheToolOutputTests(unittest.TestCase):
         self.assertIn(code, (0, 1))
 
 
+class WithdrawnOptionTests(unittest.TestCase):
+    """取り下げた選択肢（withdrawn）は選べない行＝数えない（2026-10-09・指摘と添削の作り込み）。"""
+
+    def test_a_withdrawn_option_needs_no_pros_and_is_not_counted(self):
+        content = _content(_group([
+            {"label": "案A", "recommended": True},
+            {"label": "案B", "pros": "丁寧"},
+            {"label": "案C", "withdrawn": True},
+        ]))
+
+        self.assertEqual(rp.decision_option_warnings(content), [])
+
+    def test_a_withdrawn_reason_string_counts_as_withdrawn(self):
+        content = _content(_group([
+            {"label": "案A", "recommended": True},
+            {"label": "案B", "pros": "丁寧"},
+            {"label": "案C", "withdrawn": "前の版で決めた"},
+        ]))
+
+        self.assertEqual(rp.decision_option_warnings(content), [])
+
+    def test_an_empty_or_false_withdrawn_is_still_alive(self):
+        for value in (False, "", "  ", None):
+            with self.subTest(value=value):
+                content = _content(_group([
+                    {"label": "案A", "recommended": True},
+                    {"label": "案B", "withdrawn": value},
+                ]))
+                lines = rp.decision_option_warnings(content)
+                self.assertEqual(len(lines), 1)
+                self.assertIn("「案B」に利点（pros）が無い", lines[0])
+
+    def test_one_live_option_left_after_withdrawal_is_a_warning(self):
+        content = _content(_group([
+            {"label": "案A", "recommended": True, "pros": "速い"},
+            {"label": "案B", "withdrawn": "取り下げた"},
+        ]))
+
+        lines = rp.decision_option_warnings(content)
+
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(
+            lines[0],
+            "⚠️取り下げで残り1つ（止めはしない）: Q1「進め方」＝生きた選択肢が「案A」だけ"
+            "＝実質1択。問いにする意味があるか見直す",
+        )
+
+    def test_a_single_option_group_without_withdrawal_is_not_this_warning(self):
+        content = _content(_group([{"label": "案A", "recommended": True}]))
+
+        self.assertEqual(rp.decision_option_warnings(content), [])
+
+    def test_a_group_with_only_withdrawn_options_takes_no_question_number(self):
+        content = {"decision": {"groups": [
+            _group([{"label": "旧A", "withdrawn": True}, {"label": "旧B", "withdrawn": "理由"}], legend="消えた問い"),
+            _group([{"label": "案A", "recommended": True}, {"label": "案B"}], legend="残った問い"),
+        ]}}
+
+        lines = rp.decision_option_warnings(content)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Q1「残った問い」の「案B」", lines[0])
+        self.assertEqual(rp._question_count(content), 1)
+
+    def test_the_text_only_options_check_counts_only_live_options(self):
+        # 生きた選択肢が文字だけ2つ（取り下げの辞書1つは数えない）＝「文字だけ」の警告が1行。
+        content = _content(_group(["甲", "乙", {"label": "旧", "withdrawn": True}]))
+
+        lines = rp.decision_option_warnings(content)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("選択肢が文字だけ", lines[0])
+        # 生きた選択肢が文字1つだけに減れば「取り下げで残り1つ」。
+        content = _content(_group(["甲", {"label": "旧", "withdrawn": True}]))
+        lines = rp.decision_option_warnings(content)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("取り下げで残り1つ", lines[0])
+
+    def test_the_text_only_options_warning_still_fires_without_withdrawal(self):
+        content = _content(_group(["甲", "乙"]))
+
+        self.assertEqual(len(rp.decision_option_warnings(content)), 1)
+
+    def test_is_withdrawn_reads_only_dict_options(self):
+        self.assertTrue(rp._is_withdrawn({"withdrawn": True}))
+        self.assertTrue(rp._is_withdrawn({"withdrawn": "理由"}))
+        self.assertFalse(rp._is_withdrawn({"withdrawn": False}))
+        self.assertFalse(rp._is_withdrawn({"label": "x"}))
+        self.assertFalse(rp._is_withdrawn("取り下げ"))
+        self.assertFalse(rp._is_withdrawn(None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -541,7 +541,7 @@ class RenderedWarningsTests(unittest.TestCase):
         lines = rp.rendered_warnings(page)
 
         self.assertEqual(len(lines), 1)
-        self.assertIn("「→ Q9」の飛び先（#q-9）が頁に無い（止めはしない）", lines[0])
+        self.assertIn("見出しや図の「Q9」の飛び先（#q-9）が頁に無い（止めはしない）", lines[0])
 
     def test_a_link_to_an_existing_anchor_is_fine(self):
         page = self._page(
@@ -604,6 +604,93 @@ class OptionWarningNumberingTests(unittest.TestCase):
 
         self.assertEqual(len(lines), 1)
         self.assertIn("Q1「実在」の「乙」", lines[0])
+
+
+class BoxAsksTests(unittest.TestCase):
+    """図の箱の asks（箱の角の問いの番号札・2026-10-09）の書き方の警告。"""
+
+    def test_readable_forms_give_no_warning(self):
+        content = {"visual": _diagram(
+            {"asks": 1}, {"asks": "Q2"}, {"asks": "1/2"}, {"asks": "Q1／Q3"}, {"asks": [1, "Q2", "3/4"]},
+            {"ask": "5"}, {},
+        )}
+
+        self.assertEqual(rp.asks_format_warnings(content), [])
+
+    def test_unreadable_pieces_are_named_one_by_one_with_the_place(self):
+        content = {"sections": [_section(
+            "visual", _diagram({"asks": "x", "title": "計画"}, {"asks": [0, True]}, {"asks": "1/y"}), label="流れの図",
+        )]}
+
+        lines = rp.asks_format_warnings(content)
+
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(all("図の箱の asks に問いの番号として読めない値がある（止めはしない）" in line for line in lines))
+        self.assertIn("「流れの図」の diagram の箱「計画」の asks 'x'", lines[0])
+        self.assertIn("0", lines[1])
+        self.assertIn("True", lines[2])
+        self.assertIn("'y'", lines[3])
+
+    def test_the_one_line_notation_is_checked_too(self):
+        text = "A(asks=1/2)\nB[asks=x]\nA -> B"
+        content = {"details": [{"summary": "詳細", "diagram_text": text}]}
+
+        lines = rp.asks_format_warnings(content)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("diagram_text の箱「B」の asks 'x'", lines[0])
+
+    def test_box_warnings_come_before_the_section_ones_and_are_capped(self):
+        boxes = [{"asks": "bad%d" % index} for index in range(12)]
+        content = {"visual": _diagram(*boxes), "sections": [_section("walkthrough", "手順：本文", asks="1")]}
+
+        lines = rp.asks_format_warnings(content)
+
+        self.assertEqual(len(lines), 11)
+        self.assertIn("ほか", lines[-1])
+
+    def test_flow_nodes_are_not_diagram_boxes(self):
+        content = {"flow": {"nodes": [{"id": "a", "asks": "x"}], "links": []}}
+
+        self.assertEqual(rp.asks_format_warnings(content), [])
+
+    def test_main_prints_the_box_warning_and_still_builds(self):
+        spec = _spec({"visual": _diagram({"asks": "x", "title": "計画"})})
+
+        code, out, files = _run_main(spec)
+
+        self.assertIn("図の箱の asks に問いの番号として読めない値がある", out)
+        self.assertIn(code, (0, 1))
+        self.assertIn("page-checks.html", files)
+
+
+class ManuscriptSectionIsLeftOutTests(unittest.TestCase):
+    """原稿の節（利用者の文章）は、部品の濃さ・空の強調・本文に残った ** の検査に混ぜない（2026-10-09）。"""
+
+    def test_a_manuscript_with_a_lone_double_star_gives_no_post_build_warning(self):
+        page = (
+            "<html><head><title>t</title></head><body><p>本文</p>"
+            '<section data-component="manuscript"><article class="ms" data-prose="raw">'
+            '<div class="ms-blk"><p>**閉じない <em></em> の文</p></div></article></section>'
+            "<script>x</script></body></html>"
+        )
+
+        self.assertEqual(rp.rendered_warnings(page), [])
+
+    def test_the_same_text_outside_the_manuscript_is_still_warned(self):
+        page = "<html><body><p>**閉じない</p><script>x</script></body></html>"
+
+        self.assertEqual(len(rp.rendered_warnings(page)), 1)
+
+    def test_the_markdown_text_of_a_resolved_manuscript_is_not_walked_by_the_definition_checks(self):
+        content = {"sections": [_section("manuscript", {
+            "markdown": "対の無い ** がある\n```\ncode\n```\n", "label": "l", "mode": "shiteki",
+            "source_path": "a.md", "sha256": "0" * 64, "eol": "lf",
+        })]}
+
+        self.assertEqual(rp.unbalanced_emphasis(content), [])
+        self.assertEqual(rp.duplicate_figure_numbers(content), [])
+        self.assertEqual(rp.unknown_icons(content), [])
 
 
 if __name__ == "__main__":

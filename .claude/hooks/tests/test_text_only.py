@@ -328,5 +328,171 @@ class FilesAndMainTests(unittest.TestCase):
         self.assertNotIn("文字だけの版 (試問用)", out)
 
 
+class NumberedUnitsAndWithdrawnTests(unittest.TestCase):
+    """data-blk の単位の行頭に「#N 」、取り下げた選択肢の行頭に「[取り下げ] 」、原稿の正本の textarea は黙って捨てる。
+
+    2026-10-09（指摘と添削の作り込み）：試問の読み手が、回答文の番号（#N）で頁の行を指せるようにする。
+    """
+
+    def test_the_first_line_of_a_numbered_unit_carries_the_number_and_the_rest_do_not(self):
+        text = rp.text_only(
+            '<body><div class="card" data-blk="1"><h3>見出し</h3><p>本文の文。</p></div>'
+            '<ul><li data-blk="2">一つ目<ul><li>入れ子</li></ul></li><li data-blk="3">二つ目</li></ul></body>'
+        )
+
+        self.assertIn("#1 ### 見出し\n本文の文。", text)
+        self.assertIn("#2 - 一つ目", text)
+        self.assertIn("- 入れ子", text)
+        self.assertNotIn("#2 - 入れ子", text)
+        self.assertIn("#3 - 二つ目", text)
+
+    def test_a_table_row_unit_numbers_its_row_line(self):
+        text = rp.text_only(
+            "<body><table><thead><tr><th>列A</th><th>列B</th></tr></thead><tbody>"
+            '<tr data-blk="4"><td>甲</td><td>乙</td></tr><tr data-blk="5"><td>丙</td><td>丁</td></tr>'
+            "</tbody></table></body>"
+        )
+
+        self.assertIn("列A｜列B\n#4 甲｜乙\n#5 丙｜丁", text)
+
+    def test_nested_same_tag_inside_a_unit_does_not_end_the_unit_early(self):
+        text = rp.text_only(
+            '<body><div data-blk="7"><div><p>内側の段落</p></div><p>外側の続き</p></div><p>単位の外</p></body>'
+        )
+
+        self.assertIn("#7 内側の段落\n外側の続き\n単位の外", text)
+
+    def test_an_empty_hidden_unit_gives_no_line_and_does_not_leak_its_number(self):
+        text = rp.text_only('<body><div data-blk="1" hidden></div><div data-blk="2"><p>本文</p></div></body>')
+
+        self.assertNotIn("#1 ", text)
+        self.assertIn("#2 本文", text)
+
+    def test_the_header_explains_the_numbers_only_when_there_are_numbers(self):
+        self.assertIn("行頭の #N は番号つきの単位", rp.text_only('<body><p data-blk="1">本文</p></body>'))
+        self.assertNotIn("行頭の #N", rp.text_only("<body><p>本文</p></body>"))
+
+    def test_a_code_unit_of_a_manuscript_keeps_line_breaks_and_indentation(self):
+        text = rp.text_only(
+            '<body><div data-blk="5" data-ms-type="code"><pre><code>a: 1\n  b: 2\n\nc: 3</code></pre></div>'
+            '<div data-blk="6"><p>次</p></div></body>'
+        )
+
+        self.assertIn("#5 a: 1\n  b: 2\n\nc: 3\n#6 次", text)
+
+    def test_a_pre_outside_a_manuscript_unit_is_still_collapsed(self):
+        text = rp.text_only('<body><div data-blk="5"><pre class="log">一行目\n二行目</pre></div></body>')
+
+        self.assertIn("#5 一行目 二行目", text)
+
+    def test_the_source_textarea_is_dropped_silently_but_other_textareas_are_marked(self):
+        text = rp.text_only(
+            '<body><textarea id="ms-source" class="ms-source" hidden>\n原稿の全文\n</textarea>'
+            '<textarea id="decision-objection">下書き</textarea></body>'
+        )
+
+        self.assertNotIn("原稿の全文", text)
+        self.assertEqual(text.count("[自由記述欄]"), 1)
+
+    def test_a_withdrawn_choice_gets_the_mark_once_and_a_plain_choice_does_not(self):
+        text = rp.text_only(
+            '<body><label class="choice"><input type="radio" data-req="1"><span>生きた案</span></label>'
+            '<div class="choice withdrawn" data-withdrawn="1"><s>取り下げた案</s>'
+            '<span class="why">理由の文</span></div></body>'
+        )
+
+        self.assertIn("( ) 生きた案", text)
+        self.assertIn("[取り下げ] 取り下げた案 理由の文", text)
+        self.assertEqual(text.count("[取り下げ]"), 1)
+
+    def test_a_withdrawn_badge_is_not_doubled(self):
+        text = rp.text_only(
+            '<body><div class="choice withdrawn"><span class="badge b-bad">取り下げ</span> <s>案</s></div></body>'
+        )
+
+        self.assertEqual(text.count("[取り下げ]"), 1)
+
+
+class QuestionBadgeInDiagramTests(unittest.TestCase):
+    """図の箱の角の問いの番号札（a.dia-q）は、文字だけの版で箱の題の後ろの「[Q1]」になる（2026-10-09）。
+
+    札は箱の外（図の末尾）に並ぶので、円の中心が入る枠で箱に結び付ける。結び付かない札は最後に1項目。
+    手書きの図で試す（組む側が変わっても、この検査は動く）。
+    """
+
+    @staticmethod
+    def _badge(number, cx, cy):
+        return (
+            '<a class="dia-q" href="#q-%d" aria-label="Q%d へ移動"><title>Q%d へ移動</title>'
+            '<circle cx="%s" cy="%s" r="12" fill="transparent"></circle>'
+            '<circle class="dia-q-dot" cx="%s" cy="%s" r="10"></circle>'
+            '<text x="%s" y="%s" text-anchor="middle">Q%d</text></a>'
+            % (number, number, number, cx, cy, cx, cy, cx, cy, number)
+        )
+
+    def _page(self, *badges, title="<title>図</title>"):
+        return (
+            '<body><svg class="dia" viewBox="0 0 400 100" role="img" aria-label="図">' + title
+            + '<g><rect x="10" y="10" width="160" height="60"></rect><text x="20" y="30">計画</text>'
+            '<text x="20" y="50">本文一</text></g>'
+            '<g><rect x="200" y="10" width="160" height="60"></rect><text x="210" y="30">実行</text></g>'
+            + "".join(badges) + "</svg></body>"
+        )
+
+    def test_a_badge_inside_a_box_follows_that_boxs_title(self):
+        text = rp.text_only(self._page(self._badge(1, 160, 24), self._badge(2, 136, 24), self._badge(2, 350, 24)))
+
+        self.assertIn("[図: 図｜文字: 計画 [Q1][Q2]／本文一／実行 [Q2]]", text)
+
+    def test_the_badge_label_does_not_pile_up_at_the_end(self):
+        text = rp.text_only(self._page(self._badge(1, 160, 24), self._badge(2, 350, 24)))
+
+        self.assertNotRegex(text, r"／Q\d")
+        self.assertNotIn("Q1 Q2", text)
+
+    def test_a_badge_outside_every_box_is_gathered_in_one_trailing_item(self):
+        text = rp.text_only(self._page(self._badge(3, 390, 95), self._badge(4, 395, 98)))
+
+        self.assertIn("実行／問い Q3・Q4]", text)
+
+    def test_the_badge_move_title_is_not_taken_as_the_figure_title(self):
+        # 図に題が無いとき、札の「Q1 へ移動」を図の題にしない。
+        text = rp.text_only(self._page(self._badge(1, 160, 24), title=""))
+
+        self.assertNotIn("へ移動", text)
+        self.assertIn("計画 [Q1]", text)
+
+    def test_a_figure_without_badges_is_unchanged(self):
+        text = rp.text_only(self._page())
+
+        self.assertIn("[図: 図｜文字: 計画／本文一／実行]", text)
+
+    def test_the_real_renderer_output_puts_the_badges_on_the_box_titles(self):
+        from visual import render_components as rc
+
+        plan = types.SimpleNamespace(
+            components=("overview", "visual"), reason_codes=(), audience="p", depth="d",
+            provisional=False, should_continue=False, delivery="x", publish_policy="never",
+        )
+        content = {"overview": "概要", "visual": {
+            "nodes": [
+                {"id": "a", "title": "計画", "text": "本文一", "asks": [1, 2]},
+                {"id": "b", "title": "実行", "asks": "Q2"},
+                {"id": "c", "title": "確認"},
+            ],
+            "edges": [{"from": "a", "to": "b"}, {"from": "b", "to": "c"}],
+        }}
+        page = rc.render_components(plan, title="t", content=content, glossary_entries={})
+        if "dia-q" not in page:
+            self.skipTest("図の箱の問いの番号札を、組む側がまだ描かない")
+
+        text = rp.text_only(page)
+
+        self.assertIn("計画 [Q1][Q2]", text)
+        self.assertIn("実行 [Q2]", text)
+        self.assertNotIn("へ移動", text)
+        self.assertNotRegex(text, r"確認／?Q\d")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -74,6 +74,25 @@ try:
 except ImportError:
     _render_icon_svg = None  # type: ignore[assignment]
 
+# 2026-10-09（指摘と添削の作り込み）：原稿の頁（markdown_lite）・赤ペンの script（review_scripts）・
+# 単位の番号（blocks）。どれも別の担当が作るので、無い間も動くよう同じ流儀（遅延import）で守る。
+try:
+    from .markdown_lite import render_markdown as _render_markdown
+    from .markdown_lite import source_textarea as _source_textarea
+except ImportError:
+    _render_markdown = None  # type: ignore[assignment]
+    _source_textarea = None  # type: ignore[assignment]
+
+try:
+    from . import review_scripts as _review_scripts
+except ImportError:
+    _review_scripts = None  # type: ignore[assignment]
+
+try:
+    from .blocks import number_blocks
+except ImportError:
+    number_blocks = None  # type: ignore[assignment]
+
 # 画像ブロックが積む「実測」行。evidence 節を描く時に末尾へ足す（B2）。
 # ⚠️モジュール単位の状態＝この道具は1プロセスで1頁ずつ順に組むので安全
 #   （render_components() の先頭で必ずクリアする）。
@@ -101,14 +120,29 @@ LABELS = {
     "table": "比べる",
     "diagram": "図解",
     "log": "実行の記録",
+    # 2026-10-09：原稿の頁（指摘・添削の対象の文章を、原稿の体裁のまま載せる節）。
+    "manuscript": "原稿",
 }
 
 # 回答文の未回答は「見た／見ていない」×「推奨がある／無い」の4種（2026-10-09）。
 # 「見た」＝その問い（fieldset）が、自分の高さと表示域の高さの小さいほうの半分以上、1秒表示されていた
 # （IntersectionObserver）、または問いの中で focusin・click・input が起きた。「推奨をまとめて選択」は
 # 触ったことにしない。「入力を消す」は見た状態も消す。見た状態は下書き（localStorage）の s に残す。
-# ⚠️この script は全頁共通の唯一の script＝検品の Gate は DECISION_SCRIPT.strip() との完全一致を求める。
+# ⚠️この script は全頁共通の1本目の script＝検品の Gate は DECISION_SCRIPT.strip() との完全一致を求める。
 #   script の中に書く注釈は頁ごとにバイトを増やすので、ここ（Python 側）に置く。
+#
+# 2026-10-09（指摘と添削の作り込み）：回答文の組み立てを compose()（全行の配列を返す）と build()
+#   （#decision-prompt があれば書く＝今までの build）に分け、窓口 window.pageReply として公開する。
+#     pageReply.extras  ＝ 指摘・添削の script が登録する {role:'shiteki'|'tensaku', lines:()=>行の配列, forget:()=>void}
+#     pageReply.compose ＝ 【頁の回答】題 → Q 行 → 異議 → 自由記述 → 役割の順（shiteki→tensaku）に、行が1つ以上ある
+#                          extras の節（見出し「## 指摘」「## 添削」はここで足す。lines() に見出しは含めない）→ '---' → 締めの文
+#     pageReply.rebuild ＝ build（判断欄が無ければ何もしない）／ pageReply.copy ＝ compose() の全文を写す
+#                          （写せなければ #decision-prompt を選択状態にして false を返す）
+#   ・判断欄の無い頁でも compose() は回答文を返す。「入力を消す」釦は全 extras の forget() も呼ぶ。
+#   ・extras の lines()・forget() が例外を投げても回答文は崩れない（その extras だけ飛ばす）。
+#   ・回答文の形（【頁の回答】・Q 行・未回答の4通り・異議・自由記述・---・締めの文）は変えていない。
+#   ・指摘・添削の script は、この script の後ろに別の <script> として並ぶ（review_scripts.py）。トップレベルの
+#     const・function の名前がこの script と衝突するので、必ず即時関数で包む。
 DECISION_SCRIPT = r"""const prompt=document.getElementById('decision-prompt');
 const fields=[...document.querySelectorAll('[data-req]')];
 const objections=[...document.querySelectorAll('input[type="checkbox"][name="objection"]')];
@@ -127,7 +161,7 @@ function recall(){try{const raw=localStorage.getItem(MEMORY_KEY);if(!raw)return;
 function questions(){return [...document.querySelectorAll('section[data-component="decision"] fieldset')].filter(f=>!f.classList.contains('objections')&&!f.querySelector('#decision-objection')&&f.querySelector('[data-req]'));}
 function legendText(f){const lg=f.querySelector('legend');if(!lg)return '';const c=lg.cloneNode(true);c.querySelectorAll('.q-no').forEach(x=>x.remove());return clean(c.textContent);}
 function none(f,i,scope){const rec=!!(scope||f).querySelector('[data-rec="1"]');return rec?(seen[i]?SEEN_REC:UNSEEN_REC):(seen[i]?SEEN_NOREC:UNSEEN_NOREC);}
-function build(){if(!prompt)return;const lines=['【頁の回答】'+clean(document.title)];
+function compose(){const lines=['【頁の回答】'+clean(document.title)];
 questions().forEach((f,i)=>{const n=i+1,legend=legendText(f),nt=f.querySelector('input.q-note'),note=nt?clean(nt.value):'',heads=[...f.querySelectorAll('.scale-head')];
 if(heads.length){heads.forEach((h,j)=>{const st=h.querySelector('strong'),c=h.parentElement.querySelector('input:checked');lines.push('Q'+n+'-'+(j+1)+'. '+clean((st||h).textContent)+': '+(c?clean(c.parentElement.textContent):none(f,i,h.parentElement)));});if(note)lines.push('Q'+n+' 補足. '+legend+': '+note);return;}
 const nums=[...f.querySelectorAll('input[type="number"]')];let body;
@@ -136,8 +170,9 @@ else{const got=[...f.querySelectorAll('[data-req]')].filter(x=>x.checked).map(x=
 lines.push('Q'+n+'. '+legend+': '+body+(note?' / 補足: '+note:''));});
 objections.filter(x=>x.checked).forEach(x=>{const row=x.closest('.obj-row')||x.closest('.obj'),w=row?row.querySelector('.obj-why'):null,why=w&&w.value.trim()?w.value.trim():'（未記入）';lines.push('異議. '+x.dataset.label+': '+why);});
 lines.push('自由記述: '+(objection&&objection.value.trim()?objection.value.trim():'(なし)'));
-lines.push('---');lines.push('上の回答を反映して作業を続けてください。お任せの項目は推奨案で確定してください。');
-prompt.textContent=lines.join('\n');remember();}
+[['shiteki','## 指摘'],['tensaku','## 添削']].forEach(r=>{const own=[];reply.extras.forEach(x=>{if(x.role===r[0]){try{(x.lines()||[]).forEach(l=>own.push(l));}catch(e){}}});if(own.length){lines.push(r[1]);own.forEach(l=>lines.push(l));}});
+lines.push('---');lines.push('上の回答を反映して作業を続けてください。お任せの項目は推奨案で確定してください。');return lines;}
+function build(){if(!prompt)return;const lines=compose();prompt.textContent=lines.join('\n');remember();}
 fields.forEach(x=>x.addEventListener(x.type==='radio'||x.type==='checkbox'?'change':'input',build));
 objections.forEach(x=>x.addEventListener('change',build));
 if(objection)objection.addEventListener('input',build);
@@ -146,12 +181,14 @@ notes.forEach(x=>x.addEventListener('input',build));
 const recommend=document.getElementById('recommend-decision');
 if(recommend)recommend.addEventListener('click',()=>{fields.filter(x=>x.dataset.rec==='1').forEach(x=>{if(x.type==='radio'||x.type==='checkbox')x.checked=true;});build();recommend.textContent='推奨を入れました';});
 const forget=document.getElementById('forget-decision');
-if(forget)forget.addEventListener('click',()=>{try{localStorage.removeItem(MEMORY_KEY);}catch(e){}fields.forEach(x=>{if(x.type==='radio'||x.type==='checkbox'){x.checked=false;}else{x.value='';}});objections.forEach(x=>{x.checked=false;});whys().forEach(x=>{x.value='';});notes.forEach(x=>{x.value='';});if(objection)objection.value='';seen=[];timers.forEach((t,i)=>{if(t)clearTimeout(t);timers[i]=0;});build();if(io)questions().forEach(f=>{io.unobserve(f);io.observe(f);});forget.textContent='消しました';});
+if(forget)forget.addEventListener('click',()=>{try{localStorage.removeItem(MEMORY_KEY);}catch(e){}fields.forEach(x=>{if(x.type==='radio'||x.type==='checkbox'){x.checked=false;}else{x.value='';}});objections.forEach(x=>{x.checked=false;});whys().forEach(x=>{x.value='';});notes.forEach(x=>{x.value='';});if(objection)objection.value='';seen=[];timers.forEach((t,i)=>{if(t)clearTimeout(t);timers[i]=0;});reply.extras.forEach(x=>{try{if(x.forget)x.forget();}catch(e){}});build();if(io)questions().forEach(f=>{io.unobserve(f);io.observe(f);});forget.textContent='消しました';});
 const copy=document.getElementById('copy-decision');
 const select=document.getElementById('select-decision');
 function selectPrompt(){if(!prompt)return;const range=document.createRange();range.selectNodeContents(prompt);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);}
 if(select)select.addEventListener('click',selectPrompt);
-if(copy)copy.addEventListener('click',async()=>{build();try{if(!navigator.clipboard)throw new Error('clipboard unavailable');await navigator.clipboard.writeText(prompt.textContent);copy.textContent='コピー済み';}catch(error){selectPrompt();copy.textContent='全文を選択しました';}});
+async function copyReply(){build();try{if(!navigator.clipboard)throw new Error('clipboard unavailable');await navigator.clipboard.writeText(compose().join('\n'));return true;}catch(error){selectPrompt();return false;}}
+const reply=window.pageReply={extras:[],compose:compose,rebuild:build,copy:copyReply};
+if(copy)copy.addEventListener('click',async()=>{copy.textContent=(await copyReply())?'コピー済み':'全文を選択しました';});
 const theme=document.getElementById('theme-toggle');
 if(theme)theme.addEventListener('click',()=>{const root=document.documentElement;const current=root.getAttribute('data-theme');const dark=current?current==='dark':(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches);root.setAttribute('data-theme',dark?'light':'dark');});
 recall();build();
@@ -237,6 +274,42 @@ document.addEventListener('keydown',onKey);
 document.body.appendChild(overlay);
 });
 });"""
+
+
+# 2026-10-09：使う頁にだけ足す CSS（足さない頁のバイトを増やさない）。
+# 取り下げた選択肢：破線の枠・薄く・案の文は取り消し線・絵は白黒。明暗どちらでも読めるよう色はトークンだけ。
+WITHDRAWN_CSS = (
+    ".choice.withdrawn{cursor:default;border-style:dashed;background:transparent}"
+    ".choice.withdrawn:hover{border-color:var(--rule);background:transparent}"
+    ".choice.withdrawn s{text-decoration-thickness:1.5px;color:var(--ink-2)}"
+    ".choice.withdrawn .wd-x{flex:none;width:1.1rem;margin-top:.05rem;"
+    "font:700 .95rem/1.5 ui-monospace,monospace;color:var(--ink-3);text-align:center}"
+    ".choice.withdrawn .wd-reason{color:var(--ink-2)}"
+    ".choice.withdrawn .pros-cons{color:var(--ink-3)}.choice.withdrawn .pros-cons b{opacity:.75}"
+    ".choice.withdrawn .thumb{filter:grayscale(1);opacity:.8}"
+)
+# 図の箱の右上の問いの番号札（赤い丸）。
+DIA_Q_CSS = (
+    ".dia-q{cursor:pointer;outline:none}"
+    ".dia-q:hover .dia-q-dot,.dia-q:focus-visible .dia-q-dot{fill:var(--fail-soft)}"
+    ".dia-q:focus-visible .dia-q-dot{stroke-width:2.5}"
+)
+# 原稿の節（`.ms`）の最小の様式。原稿は頁の見出しの大きさに引きずられないよう、見出しを控えめにする。
+MANUSCRIPT_CSS = (
+    ".ms{display:flex;flex-direction:column;gap:.5rem;min-width:0;font-size:.97rem;line-height:1.95;color:var(--ink)}"
+    ".ms-blk{min-width:0;overflow-wrap:anywhere;padding:.1rem 0}"
+    ".ms-blk[hidden]{display:none}"
+    ".ms-blk p{max-width:none}"
+    ".ms-blk h1,.ms-blk h2,.ms-blk h3,.ms-blk h4,.ms-blk h5,.ms-blk h6{margin:.7rem 0 0;padding:0;border:0;"
+    "font-family:inherit;font-size:1rem;line-height:1.6;color:var(--ink)}"
+    ".ms-blk h1{font-size:1.4rem}.ms-blk h2{font-size:1.22rem}.ms-blk h3{font-size:1.08rem}"
+    ".ms-blk ul,.ms-blk ol{margin:0;padding-left:1.5rem;display:flex;flex-direction:column;gap:.25rem}"
+    ".ms-blk pre{margin:0}.ms-blk pre code{background:transparent;padding:0}"
+    ".ms-blk hr{margin:.6rem 0}"
+    ".ms-blk .scroll{margin:0}"
+    ".ms-link{color:var(--accent)}.ms-url{color:var(--ink-3);font-size:.82em}.ms-img{color:var(--ink-3)}"
+    ".ms-fallback{margin:0}"
+)
 
 
 LABELED_COMPONENTS = {
@@ -732,6 +805,18 @@ def _diagram_edge_path(source: dict, target: dict, curve: bool) -> str:
     )
 
 
+def _legacy_asks_warning(value: Mapping[str, object]) -> str:
+    """旧い経路（帯・軸・箱幅の強制）の図では、箱の Q 番号の札（`asks`）は出せない＝黙って捨てず知らせる。"""
+    for item in value.get("nodes") or []:
+        if isinstance(item, Mapping) and _question_numbers(item.get("asks", item.get("ask"))):
+            return (
+                '<ul class="dia-warn"><li>'
+                + escape("箱の asks（Q 番号の札）は、帯・軸・箱幅を使う図では出せない（札は描かなかった）")
+                + "</li></ul>"
+            )
+    return ""
+
+
 def _diagram_block(
     value: object,
     glossary_entries: Mapping[str, GlossaryEntry],
@@ -752,9 +837,9 @@ def _diagram_block(
     if not isinstance(value, Mapping):
         return ""
     if value.get("bands") or value.get("axis") or value.get("box_width"):
-        return _diagram_block_legacy(value, glossary_entries, seen_terms)
+        return _diagram_block_legacy(value, glossary_entries, seen_terms) + _legacy_asks_warning(value)
     if layout_diagram is None or not (value.get("nodes") or value.get("edges")):
-        return _diagram_block_legacy(value, glossary_entries, seen_terms)
+        return _diagram_block_legacy(value, glossary_entries, seen_terms) + _legacy_asks_warning(value)
     return _diagram_block_layout(value, glossary_entries, seen_terms)
 
 
@@ -811,6 +896,10 @@ def _prep_layout_nodes(raw_nodes: Sequence[object]) -> list[dict]:
             "num": _stringify(item.get("num", "")),
             "icon": _stringify(item.get("icon", "")),
             "tone": _stringify(item.get("tone", "neutral")).lower(),
+            # 2026-10-09：箱の右上に出す問いの番号の札（`asks`／`ask`）と、中央揃えか
+            #   （配置係が札の幅の見込みを決めるのに使う）。
+            "asks": _question_numbers(item.get("asks", item.get("ask"))),
+            "align": _stringify(item.get("align", "left")).lower(),
         }
         for key in ("col", "row", "x", "y"):
             if item.get(key) is not None:
@@ -1054,6 +1143,34 @@ def _diagram_hover_attributes(detail: Mapping[str, str]) -> tuple[str, str]:
     return " " + " ".join(attrs), "<title>%s</title>" % escape(aria)
 
 
+def _diagram_q_badges(box: object) -> str:
+    """箱の右上に重ねる問いの番号の札（赤い丸に「Q1」）。押すと判断欄のその問いへ飛ぶ。
+
+    2026-10-09：札は箱の `<g>` の外へ置く（箱の吹き出しの押下と混ざらない・最前面にする）。
+    右上の角に 24px ずつ並べ、**左から Q1・Q2 の小さい順**に読めるようにする（書いた順ではなく番号の順）（2026-10-09 の撮影で
+    右端から置いた版が「Q2 Q1」と逆に読めた）。配置係が札の数だけ箱の幅を広げてあるので題と重ならない。
+    押す的は見えている丸より一回り大きく（半径12px＝隣の札と接する）取る。
+    """
+    asks = sorted(set(getattr(box, "asks", None) or []))
+    if not asks:
+        return ""
+    parts: list[str] = []
+    for index, number in enumerate(asks):
+        cx = box.x + box.w - 12 - 24 * (len(asks) - 1 - index)
+        cy = box.y + 12
+        parts.append(
+            '<a class="dia-q" href="#q-%d" aria-label="Q%d へ移動">'
+            "<title>Q%d へ移動</title>"
+            '<circle cx="%.1f" cy="%.1f" r="12" fill="transparent"></circle>'
+            '<circle class="dia-q-dot" cx="%.1f" cy="%.1f" r="10" fill="var(--surface)" '
+            'stroke="var(--fail)" stroke-width="1.5"></circle>'
+            '<text x="%.1f" y="%.1f" text-anchor="middle" font-size="9.5" font-weight="700" '
+            'fill="var(--fail)">Q%d</text></a>'
+            % (number, number, number, cx, cy, cx, cy, cx, cy + 3.4, number)
+        )
+    return "".join(parts)
+
+
 def _diagram_block_layout(
     value: Mapping[str, object],
     glossary_entries: Mapping[str, GlossaryEntry],
@@ -1091,6 +1208,7 @@ def _diagram_block_layout(
     }
 
     shapes: list[str] = []
+    badge_shapes: list[str] = []
     icon_warnings: list[str] = []
     hover_count = 0
     for box in layout.boxes:
@@ -1182,6 +1300,7 @@ def _diagram_block_layout(
             "<g%s>%s%s%s%s%s</g>"
             % (group_attrs, title_tag, rect, underline, icon_html, "".join(text_parts))
         )
+        badge_shapes.append(_diagram_q_badges(box))
 
     # ⚠️矢じりの色＝矢印線の色に揃える（2026-09-12）。以前は全部 var(--accent) 固定で、
     #   色味（tone）を付けた辺・破線の辺でも矢じりだけ既定色のままずれていた。
@@ -1249,7 +1368,7 @@ def _diagram_block_layout(
     svg = (
         '<svg class="dia" viewBox="0 0 %.0f %.0f" width="%.0f" height="%.0f" '
         'style="min-width:%dpx" role="img" aria-label="%s">'
-        "<title>%s</title>%s%s%s%s</svg>"
+        "<title>%s</title>%s%s%s%s%s</svg>"
         % (
             width, height, width, height, min_width,
             escape(described, quote=True),
@@ -1258,6 +1377,7 @@ def _diagram_block_layout(
             "".join(route_paths_svg),
             "".join(shapes),
             "".join(route_labels_svg),
+            "".join(badge_shapes),
         )
     )
     caption = _stringify(value.get("caption", ""))
@@ -3282,6 +3402,26 @@ def _truthy(value: object) -> bool:
     return bool(value)
 
 
+def _withdrawn_info(value: object) -> tuple[bool, str]:
+    """選択肢の `withdrawn`（true か理由の文字列）を (取り下げか, 理由) に直す。
+
+    文字列は理由として読む（"false"・"0"・"no"・"off"・空は取り下げではない）。
+    """
+    if value is None or value is False:
+        return False, ""
+    if value is True:
+        return True, ""
+    if isinstance(value, str):
+        text = value.strip()
+        lowered = text.lower()
+        if lowered in {"", "false", "0", "no", "off"}:
+            return False, ""
+        if lowered in {"true", "1", "yes", "on"}:
+            return True, ""
+        return True, text
+    return bool(value), ""
+
+
 def _decision_parts(value: object) -> tuple[str, bool]:
     if isinstance(value, Mapping):
         label = value.get("label", value.get("value", ""))
@@ -3428,6 +3568,8 @@ def _choice_input(
     thumb: object = None,
     glossary_entries: Mapping[str, GlossaryEntry] | None = None,
     seen_terms: set[str] | None = None,
+    withdrawn: bool = False,
+    withdrawn_reason: str = "",
 ) -> str:
     """選択肢を1つ組む。⚠️**理由（why）を必ず置けるようにする**のがこの関数の要点。
 
@@ -3435,10 +3577,16 @@ def _choice_input(
     書けなかった。参照頁は選択肢ごとに理由を添えており、そこが密度の差の主因だった。
     2026-10-08：利点（pros）と代償（cons）を分けて置ける（非推奨にも利点を書かせるため）。
     絵（thumb）は文字の右に並べる（狭い画面では下）。
+    2026-10-09：取り下げた選択肢（withdrawn）は <input> を置かない＝選べず、`data-req` が無いので
+    推奨のまとめ選択・入力の消去・見た判定・回答文のどれにも出ない。案の文は取り消し線で残す
+    （人が前の版で見た案がなぜ消えたかを読めるようにする）。
     """
     entries = glossary_entries or {}
     seen = seen_terms if seen_terms is not None else set()
     label = escape(label_text, quote=True)
+    if withdrawn:
+        recommended = False
+        badge, tone = "取り下げ", "bad"
     rec = ' data-rec="1"' if recommended else ""
     badge_html = (
         '<span class="badge b-%s%s">%s</span> '
@@ -3474,6 +3622,29 @@ def _choice_input(
     thumb_failed = thumb_html.startswith('<span class="thumb thumb-missing"')
     inline_thumb = thumb_html if thumb_failed else ""
     side_thumb = "" if thumb_failed else thumb_html
+    if withdrawn:
+        reason_html = (
+            '<span class="why wd-reason">取り下げの理由：'
+            + _inline_with_breaks(withdrawn_reason, entries, seen)
+            + "</span>"
+            if withdrawn_reason
+            else ""
+        )
+        return (
+            '<div class="choice withdrawn%s" data-withdrawn="1">'
+            '<span class="wd-x" aria-hidden="true">×</span>'
+            "<span>%s<s>%s</s>%s%s%s%s</span>%s</div>"
+            % (
+                " has-thumb" if side_thumb else "",
+                badge_html,
+                _render_inline(label_text, entries, seen),
+                reason_html,
+                pros_cons_html,
+                why_html,
+                inline_thumb,
+                side_thumb,
+            )
+        )
     return (
         '<label class="choice%s"><input type="%s" name="%s" data-req="1" data-label="%s"%s>'
         "<span>%s%s%s%s%s</span>%s</label>"
@@ -3668,10 +3839,12 @@ def _decision_block(
                     pros = option.get("pros", "")
                     cons = option.get("cons", "")
                     thumb = option.get("thumb")
+                    withdrawn, withdrawn_reason = _withdrawn_info(option.get("withdrawn"))
                 else:
                     label_text, recommended = _decision_parts(option)
                     why, badge, tone = "", "", ""
                     pros, cons, thumb = "", "", None
+                    withdrawn, withdrawn_reason = False, ""
                 if recommended and not badge:
                     badge, tone = "推奨", "good"
                 rows.append(
@@ -3688,6 +3861,8 @@ def _decision_block(
                         thumb=thumb,
                         glossary_entries=entries,
                         seen_terms=seen,
+                        withdrawn=withdrawn,
+                        withdrawn_reason=withdrawn_reason,
                     )
                 )
         intro_html = (
@@ -3701,15 +3876,18 @@ def _decision_block(
             if group_note
             else ""
         )
+        # 2026-10-09：選べる行（data-req）が1つも無い群（全部取り下げ）は問いに数えない＝
+        #   JS の questions()（回答文の Q 番号）と同じ規則。
+        live = kind != "free" and any('data-req="1"' in row for row in rows)
         # 2026-10-08：問いごとの補足欄（回答文の「 / 補足: …」になる）。自由記述の群には要らない。
         qnote_html = (
             '<input type="text" class="q-note" data-q="%d" placeholder="補足（任意）" '
             'aria-label="%s">' % (index, escape(legend + " の補足", quote=True))
-            if rows and kind != "free"
+            if live
             else ""
         )
         question_no = 0
-        if rows and kind != "free":
+        if live:
             question_no = counter[0]
             counter[0] += 1
         fieldset_open = (
@@ -3780,6 +3958,8 @@ def _question_numbers(asks: object) -> list[int]:
 
     1・"1"・"Q1"・"q1" のどれでも受ける。読めない要素・0 以下は黙って捨て、重複は1つにする。
     ⚠️bool は int の仲間だが番号ではない（true を 1 と読まない）。
+    2026-10-09：文字列は「/」「／」で区切って複数を書ける（図の1行記法 `A(asks=1/2)` が
+    「,」を属性の区切りに使うので、番号の区切りは「/」）。
     """
     if asks is None:
         return []
@@ -3789,19 +3969,23 @@ def _question_numbers(asks: object) -> list[int]:
         return []
     numbers: list[int] = []
     for item in asks:
-        number = 0
-        if isinstance(item, bool):
+        candidates: list[object] = [item]
+        if isinstance(item, str):
+            candidates = [part for part in re.split("[/／]", item)]
+        for candidate in candidates:
             number = 0
-        elif isinstance(item, int):
-            number = item
-        elif isinstance(item, str):
-            text = item.strip()
-            if text[:1] in ("Q", "q"):
-                text = text[1:].strip()
-            if text.isascii() and text.isdigit():
-                number = int(text)
-        if number > 0 and number not in numbers:
-            numbers.append(number)
+            if isinstance(candidate, bool):
+                number = 0
+            elif isinstance(candidate, int):
+                number = candidate
+            elif isinstance(candidate, str):
+                text = candidate.strip()
+                if text[:1] in ("Q", "q"):
+                    text = text[1:].strip()
+                if text.isascii() and text.isdigit():
+                    number = int(text)
+            if number > 0 and number not in numbers:
+                numbers.append(number)
     return numbers
 
 
@@ -3861,6 +4045,108 @@ def _provenance_block(
     )
 
 
+_REVIEW_ROLES = ("shiteki", "tensaku")
+
+
+def _extra_css(body_html: str, roles: Sequence[str], has_manuscript: bool) -> str:
+    """頁の末尾の `<style>` へ足す CSS。使う機能のある頁にだけ足す（無ければ空文字＝今までと同じ）。"""
+    parts: list[str] = []
+    if 'class="choice withdrawn' in body_html:
+        parts.append(WITHDRAWN_CSS)
+    if 'class="dia-q"' in body_html:
+        parts.append(DIA_Q_CSS)
+    if has_manuscript:
+        parts.append(MANUSCRIPT_CSS)
+    if _review_scripts is not None and roles:
+        # 2026-10-09（B の報告）：役割ごとの定数を並べると、両方載る頁で共通の CSS（約3.5KB）が
+        # 2回入る。review_css は共通を1回だけ入れる。
+        combine = getattr(_review_scripts, "review_css", None)
+        if combine is not None:
+            css = combine(tuple(roles))
+            if css:
+                parts.append(css)
+        else:
+            for role in roles:
+                css = getattr(_review_scripts, "REVIEW_CSS_" + role.upper(), "")
+                if css:
+                    parts.append(css)
+    return (NEWLINE + NEWLINE.join(parts)) if parts else ""
+
+
+def _extra_scripts(roles: Sequence[str]) -> str:
+    """判断欄の script の後ろに、役割の順で並べる script（指摘・添削）。無ければ空文字。"""
+    if _review_scripts is None:
+        return ""
+    out: list[str] = []
+    for role in roles:
+        script = getattr(_review_scripts, role.upper() + "_SCRIPT", "")
+        if script:
+            out.append(NEWLINE + "<script>" + NEWLINE + script + NEWLINE + "</script>")
+    return "".join(out)
+
+
+def _page_review_mode(content: Mapping[str, object]) -> str:
+    """定義の `review`（文字列か `{"mode": …}`）を none／shiteki／tensaku／both に直す。
+
+    レンダラーの既定は none（review を書かない定義の出力は今までと同じ）。
+    review_scripts が無い間は none 扱い（script も CSS も足さない）。
+    """
+    raw = content.get("review")
+    if isinstance(raw, Mapping):
+        raw = raw.get("mode")
+    if _review_scripts is None:
+        return "none"
+    try:
+        return str(_review_scripts.normalize_mode(raw))
+    except Exception:
+        return "none"
+
+
+def _roles_for(mode: str, manuscript_modes: Sequence[str]) -> list[str]:
+    """頁に載せる赤ペンの役割（shiteki・tensaku）を、載せる順で返す。
+
+    定義の review が決める役割に、原稿の節（manuscript）が使う mode の役割を必ず足す
+    （review が none でも、原稿の節の画面は動かす）。判断欄の script は常に先頭の1本＝ここには含めない。
+    """
+    if _review_scripts is None:
+        return []
+    roles: set[str] = set()
+    try:
+        roles.update(str(r) for r in _review_scripts.roles_for_mode(mode))
+    except Exception:
+        pass
+    roles.update(m for m in manuscript_modes if m in _REVIEW_ROLES)
+    return [role for role in _REVIEW_ROLES if role in roles]
+
+
+def _manuscript_mode(value: object, page_mode: str) -> str:
+    """原稿の節の mode（shiteki／tensaku）。節に無ければ頁の review に合わせ、それも無ければ指摘。"""
+    if isinstance(value, Mapping):
+        mode = _stringify(value.get("mode", "")).strip().lower()
+        if mode in _REVIEW_ROLES:
+            return mode
+    return "tensaku" if page_mode == "tensaku" else "shiteki"
+
+
+def _manuscript_block(value: object) -> str:
+    """原稿の節の中身。`{"markdown","label","mode","source_path","sha256","eol"}`（render_page.py が path を読んで作る）。
+
+    原稿の見せる版（`article.ms[data-prose="raw"]`）と、正本の hidden の textarea（#ms-source）を並べる。
+    markdown_lite が無い間は、原文をエスケープして `<pre>` に出す（黙って消さない）。
+    """
+    data = value if isinstance(value, Mapping) else {"markdown": _stringify(value)}
+    markdown = _stringify(data.get("markdown", ""))
+    if _render_markdown is None or _source_textarea is None:
+        return '<pre class="ms-fallback">' + escape(markdown) + "</pre>"
+    return _render_markdown(markdown) + _source_textarea(
+        markdown,
+        label=_stringify(data.get("label", "")),
+        path=_stringify(data.get("source_path", data.get("path", ""))),
+        sha=_stringify(data.get("sha256", data.get("sha", ""))),
+        eol=_stringify(data.get("eol", "lf")).strip().lower() or "lf",
+    )
+
+
 def render_components(
     plan: ExplanationPlan,
     *,
@@ -3909,6 +4195,8 @@ def render_components(
         toc_entries.append(("sec-1", "", LABELS["summary"]))
 
     question_counter = [1]
+    page_review_mode = _page_review_mode(content)
+    manuscript_modes: list[str] = []
 
     def _one_section(
         component: str,
@@ -3922,13 +4210,18 @@ def render_components(
         asks（2026-10-09）＝この節が関わる問いの番号。見出しの文字の直後に
         「→ Q1」の飛び先（`#q-1`）を並べる。目次には出さない。
         """
-        body = (
-            _decision_block(
+        extra_attr = ""
+        if component == "decision":
+            body = _decision_block(
                 body_value, entries, seen_terms, question_counter=question_counter
             )
-            if component == "decision"
-            else _text_block(body_value, component, entries, seen_terms)
-        )
+        elif component == "manuscript":
+            body = _manuscript_block(body_value)
+            mode = _manuscript_mode(body_value, page_review_mode)
+            manuscript_modes.append(mode)
+            extra_attr = ' data-review-mode="%s"' % mode
+        else:
+            body = _text_block(body_value, component, entries, seen_terms)
         heading = _render_inline(label, entries, seen_terms)
         num_html = (
             '<span class="sec-no">' + escape(num) + "</span>" if num else ""
@@ -3936,8 +4229,8 @@ def render_components(
         anchor = "sec-%d" % (len(sections) + 1)
         toc_entries.append((anchor, num, label))
         return (
-            '<section data-component="%s" id="%s"><h2>%s%s%s</h2>%s</section>'
-            % (escape(component, quote=True), escape(anchor, quote=True),
+            '<section data-component="%s" id="%s"%s><h2>%s%s%s</h2>%s</section>'
+            % (escape(component, quote=True), escape(anchor, quote=True), extra_attr,
                num_html, heading, _question_refs(asks), body)
         )
 
@@ -4046,6 +4339,18 @@ def render_components(
         glossary_entries=entries,
         seen_terms=seen_terms,
     )
+    # 2026-10-09：赤ペンの script と CSS・単位の番号。review を書かない定義（none）の頁は今までと同じ出力。
+    review_roles = _roles_for(page_review_mode, manuscript_modes)
+    body_html = (
+        f'<div class="wrap"{layout_attr}><header{header_component}><div class="head-row">'
+        f'<p class="eyebrow">{eyebrow_html}</p><button id="theme-toggle" type="button">'
+        f'明暗を切り替える</button></div><h1>{h1_html}</h1>{lede}</header>{flow_open}'
+        f"{''.join(sections)}{flow_close}{rail_html}{provenance}</div>"
+    )
+    if page_review_mode != "none" and number_blocks is not None:
+        body_html, _block_infos = number_blocks(body_html)
+    extra_css = _extra_css(body_html, review_roles, bool(manuscript_modes))
+    extra_scripts = _extra_scripts(review_roles)
     return f"""<!doctype html>
 <html lang="ja">
 <head>
@@ -4095,10 +4400,10 @@ pre.log.diff{{padding:.7rem 0}}pre.log.diff span{{display:block;padding:0 1rem}}
 .choice.has-thumb{{display:grid;grid-template-columns:auto minmax(0,1fr) min(12rem,38%)}}.choice .thumb{{display:block;grid-column:3;width:100%;min-width:0;margin:0;padding:.3rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);line-height:0}}.choice .thumb img,.choice .thumb svg{{display:block;width:100%;height:auto}}.thumb-missing{{display:block;margin-top:.3rem;font-size:.78rem;line-height:1.6;color:var(--warn)}}.choice .thumb.thumb-missing{{grid-column:auto;width:auto;margin:.3rem 0 0;padding:0;border:0;background:transparent;line-height:1.6}}.choice .thumb .thumb-missing{{margin-top:.25rem}}@media(max-width:600px){{.choice.has-thumb{{grid-template-columns:auto minmax(0,1fr)}}.choice .thumb{{grid-column:2;max-width:16rem}}}}
 .q-note{{display:block;width:100%;margin:.4rem 0 0;padding:.45rem .6rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem}}
 .q-ref{{display:inline-block;margin-left:.6rem;padding:.05rem .55rem;border:1px solid var(--accent);border-radius:999px;background:var(--accent-soft);color:var(--accent);font:600 .72rem/1.6 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.03em;text-decoration:none;vertical-align:.2em;white-space:nowrap}}.q-ref:hover,.q-ref:focus-visible{{background:var(--accent);color:var(--on-accent)}}.q-no{{display:inline-block;margin-right:.45rem;padding:0 .4rem;border-radius:2px;background:var(--accent-soft);color:var(--accent);font-weight:700}}fieldset[id^="q-"]{{scroll-margin-top:1.2rem}}fieldset:target{{outline:2px solid var(--accent);outline-offset:6px;border-radius:2px}}
-@media print{{@page{{size:A4;margin:15mm}}#theme-toggle,.copy-btn,#copy-decision{{display:none !important}}.wrap[data-layout="rail"]{{display:block}}.wrap[data-layout="rail"]>.rail{{order:0;position:static;max-height:none;overflow:visible}}.card,.scroll,pre,.dia-wrap,.chart-wrap,details,.img-figure,.compare,.callout-legend{{break-inside:avoid;page-break-inside:avoid}}.t::after{{display:none !important}}.zoom-overlay,.dia-node-tip,.dia-hover-hint{{display:none !important}}}}
+@media print{{@page{{size:A4;margin:15mm}}#theme-toggle,.copy-btn,#copy-decision{{display:none !important}}.wrap[data-layout="rail"]{{display:block}}.wrap[data-layout="rail"]>.rail{{order:0;position:static;max-height:none;overflow:visible}}.card,.scroll,pre,.dia-wrap,.chart-wrap,details,.img-figure,.compare,.callout-legend{{break-inside:avoid;page-break-inside:avoid}}.t::after{{display:none !important}}.zoom-overlay,.dia-node-tip,.dia-hover-hint{{display:none !important}}}}{extra_css}
 </style>
 </head>
-<body><div class="wrap"{layout_attr}><header{header_component}><div class="head-row"><p class="eyebrow">{eyebrow_html}</p><button id="theme-toggle" type="button">明暗を切り替える</button></div><h1>{h1_html}</h1>{lede}</header>{flow_open}{''.join(sections)}{flow_close}{rail_html}{provenance}</div>
+<body>{body_html}
 <script>
 {DECISION_SCRIPT}
-</script></body></html>"""
+</script>{extra_scripts}</body></html>"""

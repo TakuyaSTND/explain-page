@@ -494,5 +494,46 @@ class ArtifactInspectionTests(unittest.TestCase):
         self.assertTrue(any("missing-description" in error for error in result.errors))
 
 
+class RawProseAndScriptRolesTests(unittest.TestCase):
+    """原稿の節（data-prose="raw"）と、判断欄・指摘・添削の3本の script（2026-10-09）。詳しくは test_review_gate.py。"""
+
+    def test_raw_prose_inside_the_manuscript_section_is_not_asked_to_wrap_known_terms(self):
+        html = (
+            '<header data-component="overview">概要</header>'
+            '<section data-component="manuscript"><article data-prose="raw">'
+            "<p>knownCamel を原稿に書いた。</p></article></section>"
+        )
+
+        result = inspect_artifact_html(
+            html,
+            required_components=("overview", "manuscript"),
+            glossary_entries={"knownCamel": GlossaryEntry("knownCamel", "既知の識別子", "project")},
+        )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.unwrapped_identifiers, ())
+
+    def test_raw_prose_outside_the_manuscript_section_is_an_error(self):
+        html = (
+            '<header data-component="overview">概要</header>'
+            '<section data-component="walkthrough"><article data-prose="raw"><p>x</p></article></section>'
+        )
+
+        result = inspect_artifact_html(html, required_components=("overview",), glossary_entries={})
+
+        self.assertIn("raw prose is only allowed inside the manuscript section", result.errors)
+
+    def test_two_decision_scripts_are_a_duplicate_not_a_third_role(self):
+        html = (
+            '<header data-component="overview">概要</header>'
+            f"<script>{DECISION_SCRIPT}</script><script>{DECISION_SCRIPT}</script>"
+        )
+
+        result = inspect_artifact_html(html, required_components=("overview",), glossary_entries={})
+
+        self.assertFalse(result.ok)
+        self.assertIn("duplicate inline script: decision", result.errors)
+
+
 if __name__ == "__main__":
     unittest.main()

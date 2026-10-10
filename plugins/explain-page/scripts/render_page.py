@@ -119,6 +119,26 @@
   書き出し＝<name>.html・<name>-artifact.html のほかに、画像・図・script・style を外した
          <name>-text.txt（文字だけの版）を同じ置き場へ書く。判断の頁の試問はこの文字だけの版を読ませる。
 
+2026-10-09（指摘と添削の作り込み）：
+  - 原稿の頁＝sections に部品 "manuscript" を置くと、原稿（Markdown）を頁に載せ、利用者がその上に
+    指摘を打つ・直す。path は定義の置き場でなく**プロジェクトの根からの相対**（絶対でもよい）。
+      {"component":"manuscript","label":"原稿",
+       "content":{"path":"docs/intro.md","label":"intro-01","mode":"shiteki"}}
+    mode は "shiteki"（指摘＝既定）か "tensaku"（添削）。原稿は UTF-8・800KB まで・節は1頁に1つ。
+    読めなければ組み立てを止める（終了コード2）。頁の番号 #N は原稿のブロック（空行区切り・見出し・
+    表・コードなど）の通し番号で、回答文の番号と同じ。文字だけの版の行頭にも同じ #N が付く。
+    原稿の頁で欠けた部品（要約・手順・具体例・現在地・図・詳細・用語・根拠・判断）は、短い既定で
+    この道具が足して1行ずつ知らせる。⚠️overview（一言でいうと）だけは書き手の責任＝足さない。
+  - "review"（content の欄）＝頁に載せる赤ペンの script："none"｜"shiteki"｜"tensaku"｜"both"。
+    説明の頁の既定は "both"（指摘と添削の両方・REVIEW_DEFAULT）＝読むために押した所で板は開かず、
+    画面の右下の帯で「指摘する」「直す」を入れたときだけ動く。{"mode":"both"} の書き方でもよい。
+    原稿の頁は書かなければ原稿の mode の役割だけ（足りない役割は必ず足す）。
+  - 判断の選択肢に "withdrawn": true か "withdrawn": "理由" を書くと、選べない取り消し線の行として
+    残る（案を取り下げた経緯を見せる）。取り下げは「実質1択」「文字だけ」の数から外れ、
+    生きた選択肢が1つになると「取り下げで残り1つ」と警告する（止めはしない）。
+  - 図の箱に "asks":[1,2]（1・"Q1"・"1/2" も可）を書くと、箱の角に赤い「Q1」の番号札が付く
+    （押すと判断欄の問いへ飛ぶ）。1行記法なら A(asks=1/2)。読めない値は警告する。
+
 側柱（頁全体の2段組み）＝content に `"rail": [ {塊}, … ]` を足すと、
 広い画面（1100px以上）で本文の右に添え物が立つ。⚠️**側柱は節ではない**
 （部品の目印を持たない）＝節そのものは横に並べない、という裁定を守るための形。
@@ -129,6 +149,7 @@
 componentごとの書き方＝どれも「見出し：本文」を改行で並べるだけ。
 evidenceだけ「種類：内容｜出所」の3つ組にする（出所を空にすると検査で落ちる）。
 """
+import hashlib
 import io
 import json
 import os
@@ -174,6 +195,15 @@ try:
     from visual.diagram_dsl import parse_diagram_text as _parse_diagram_text  # noqa: E402
 except Exception:  # noqa: BLE001
     _parse_diagram_text = None
+# 2026-10-09（指摘と添削の作り込み）：原稿の頁の分割・描画は visual/markdown_lite.py。赤ペンの script の
+# 正本は visual/review_scripts.py（まだ無い環境では、役割の正規化だけこの道具の控えを使う）。
+from visual.markdown_lite import count_blocks as _count_blocks  # noqa: E402
+from visual.markdown_lite import normalize_newlines as _normalize_newlines  # noqa: E402
+
+try:
+    from visual.review_scripts import normalize_mode as _review_normalize_mode  # noqa: E402
+except ImportError:
+    _review_normalize_mode = None
 
 # 2026-09-25：Codexの依頼の受付が残す印は、この時間より古ければ使わない
 # （visual/turn_marker.py の既定と揃える）。
@@ -182,6 +212,15 @@ CODEX_TURN_MAX_AGE_SECONDS = 21600
 # render_page.py はPolicyを読まないのでここに複製する。
 RECEIPT_MAX_ARTIFACT_BYTES = 2_097_152
 RECEIPT_TTL_SECONDS = 86400
+
+# 2026-10-09（利用者の選択＝説明の頁の既定は指摘と添削の両方）：定義に review が無いときに入れる値。
+# "none"｜"shiteki"｜"tensaku"｜"both"。レンダラー（render_components）の既定は none のまま＝
+# 既存の試験と頁を変えない。この道具だけが既定を入れる。原稿の頁は原稿の mode の役割だけ。
+REVIEW_DEFAULT = "both"
+REVIEW_MODES = ("none", "shiteki", "tensaku", "both")
+MANUSCRIPT_MODES = ("shiteki", "tensaku")
+# 頁には原稿が2通り（見せる版と textarea）入る。記号の多い原稿で約3.4倍＝800KB でも頁は 3MB に収まる（上限 4MB）。
+MANUSCRIPT_MAX_BYTES = 800_000
 
 # 応答の言葉で後から要求されうる部品の全部。頁は既定でこれを全部入れる。
 ALL_COMPONENTS = ("overview", "summary", "walkthrough", "examples", "progress",
@@ -291,8 +330,374 @@ def content_of(spec):
     return content
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-09（指摘と添削の作り込み）：原稿の頁と赤ペンの script の既定。
+# 定義の中の原稿の節（component が manuscript）を読み込んで辞書に置き換え、欠けた部品を短い既定で足し、
+# 赤ペンの役割（review）を決める。⚠️どれも定義の写しを返す（元の定義の辞書は変えない）。
+# ---------------------------------------------------------------------------
+class ManuscriptError(ValueError):
+    """原稿を読めない・使えないときの理由（1行）。main が止める理由として出す。"""
+
+
+_MISSING = object()
+_MODE_ALIASES = {"指摘": "shiteki", "添削": "tensaku", "両方": "both", "なし": "none"}
+_MODE_WORDS = {"shiteki": "指摘", "tensaku": "添削"}
+
+
+def _manuscript_entries(content):
+    """原稿の節の置き場を返す。返るもの＝(sections の添字の一覧, 上位の鍵 manuscript があるか)。"""
+    indexes = []
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for index, entry in enumerate(sections):
+            if isinstance(entry, Mapping) and str(entry.get("component", "")).strip() == "manuscript":
+                indexes.append(index)
+    return indexes, content.get("manuscript") is not None
+
+
+def _manuscript_mode(value):
+    """原稿の mode を shiteki か tensaku にする（日本語の別名も可・無ければ shiteki）。"""
+    if value is None or str(value).strip() == "":
+        return "shiteki"
+    text = _MODE_ALIASES.get(str(value).strip(), str(value).strip().lower())
+    if text not in MANUSCRIPT_MODES:
+        raise ManuscriptError("原稿の mode は shiteki（指摘）か tensaku（添削）: %r" % (value,))
+    return text
+
+
+def _shown_path(path, project_root):
+    """頁に書く原稿の場所。プロジェクトの中なら相対（/ 区切り）・外ならファイル名だけ
+    （公開した頁に利用者の机の絶対パスを残さない）。"""
+    absolute = os.path.abspath(path)
+    root = os.path.abspath(str(project_root)) if project_root else ""
+    if root:
+        try:
+            if os.path.commonpath([absolute, root]) == root:
+                return os.path.relpath(absolute, root).replace(os.sep, "/")
+        except ValueError:
+            pass
+    return os.path.basename(absolute)
+
+
+def _read_manuscript(spec_value, project_root):
+    """原稿の節の中身（path・label・mode）を読み、約束の辞書にする。読めなければ ManuscriptError。
+
+    返るもの＝{"markdown","label","mode","source_path","sha256","eol"}。markdown は LF にそろえた全文、
+    sha256 は元のファイルのバイトの値、eol は元のファイルの改行（lf か crlf）。
+    """
+    if isinstance(spec_value, Mapping) and isinstance(spec_value.get("markdown"), str):
+        return dict(spec_value)  # 読み込み済み（2度目の呼び出し）
+    if isinstance(spec_value, str):
+        spec_value = {"path": spec_value}
+    if not isinstance(spec_value, Mapping) or not str(spec_value.get("path", "") or "").strip():
+        raise ManuscriptError("原稿の節に path が無い（content に {\"path\":\"docs/intro.md\"} を書く）")
+    given = str(spec_value["path"]).strip()
+    candidates = [given] if os.path.isabs(given) else [
+        os.path.join(str(project_root or ""), given), os.path.join(os.getcwd(), given),
+    ]
+    found = next((c for c in candidates if os.path.isfile(c)), None)
+    if found is None:
+        raise ManuscriptError("原稿が見つからない: %s（プロジェクトの根からの相対か絶対で書く）" % given)
+    size = os.path.getsize(found)
+    if size > MANUSCRIPT_MAX_BYTES:
+        raise ManuscriptError("原稿が大きすぎる: %d バイト（上限 %d）" % (size, MANUSCRIPT_MAX_BYTES))
+    with io.open(found, "rb") as handle:
+        raw = handle.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ManuscriptError("原稿を UTF-8 として読めない: %s" % given) from None
+    if "\x00" in text:
+        raise ManuscriptError("原稿に NUL 文字がある＝テキストの原稿ではない: %s" % given)
+    crlf = text.count("\r\n")
+    eol = "crlf" if crlf and crlf >= text.count("\n") - crlf else "lf"
+    markdown = _normalize_newlines(text)
+    if _count_blocks(markdown) == 0:
+        raise ManuscriptError("原稿にブロックが無い（空か空白だけ）: %s" % given)
+    label = str(spec_value.get("label", "") or "").strip() or os.path.splitext(os.path.basename(found))[0]
+    return {
+        "markdown": markdown,
+        "label": label,
+        "mode": _manuscript_mode(spec_value.get("mode")),
+        "source_path": _shown_path(found, project_root),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "eol": eol,
+    }
+
+
+def resolve_manuscripts(spec, project_root=None):
+    """定義の原稿の節を読み込み、辞書に置き換えた**定義の写し**を返す（無ければ spec をそのまま返す）。
+
+    原稿の節＝sections の component が manuscript の項目（content が無ければ content["manuscript"]）。
+    ⚠️原稿の節は1頁に1つ（textarea の id が重なるため）。読み込み済みの定義に何度かけても同じ。
+    """
+    content = spec.get("content") if isinstance(spec, Mapping) else None
+    if not isinstance(content, Mapping):
+        return spec
+    indexes, top_level = _manuscript_entries(content)
+    if not indexes and not top_level:
+        return spec
+    if len(indexes) > 1:
+        raise ManuscriptError("原稿の節は1頁に1つだけ（%d 個ある）" % len(indexes))
+    content2 = dict(content)
+    if indexes:
+        sections = list(content["sections"])
+        entry = dict(sections[indexes[0]])
+        value = entry.get("content")
+        if value is None:
+            value = content.get("manuscript")
+        entry["content"] = _read_manuscript(value, project_root)
+        sections[indexes[0]] = entry
+        content2["sections"] = sections
+        if content2.get("manuscript") is not None:
+            content2["manuscript"] = entry["content"]
+    else:
+        content2["manuscript"] = _read_manuscript(content["manuscript"], project_root)
+    spec2 = dict(spec)
+    spec2["content"] = content2
+    components = list(spec.get("components", ()))
+    if not indexes and "manuscript" not in components:
+        components.append("manuscript")
+        spec2["components"] = components
+    return spec2
+
+
+def _manuscript_of(content):
+    """読み込み済みの原稿の辞書を返す（無ければ None）。"""
+    if not isinstance(content, Mapping):
+        return None
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if isinstance(entry, Mapping) and str(entry.get("component", "")).strip() == "manuscript":
+                value = entry.get("content")
+                if value is None:
+                    value = content.get("manuscript")
+                if isinstance(value, Mapping) and isinstance(value.get("markdown"), str):
+                    return value
+    value = content.get("manuscript")
+    if isinstance(value, Mapping) and isinstance(value.get("markdown"), str):
+        return value
+    return None
+
+
+def _manuscript_stats(manuscript):
+    """原稿の行数・文字数・ブロック数（頁の要約・根拠・詳細に書く実測）。"""
+    text = manuscript["markdown"]
+    lines = text.count("\n") + (0 if (not text or text.endswith("\n")) else 1)
+    return lines, len(text), _count_blocks(text)
+
+
+def _manuscript_defaults(manuscript):
+    """原稿の頁で欠けた部品の既定の中身（短く）。返るもの＝{部品名: 中身}。"""
+    lines, chars, blocks = _manuscript_stats(manuscript)
+    mode = manuscript["mode"]
+    word = _MODE_WORDS[mode]
+    label = manuscript["label"]
+    path = manuscript["source_path"]
+    sha8 = manuscript["sha256"][:8]
+    verb = "指摘を打つ" if mode == "shiteki" else "直す"
+    paste = "画面の回答文を会話へ貼り付ける" if mode == "shiteki" else "画面の回答文（完成形つき）を会話へ貼り付ける"
+    if mode == "shiteki":
+        walk = (
+            "読む：原稿を上から読む。行頭の番号 #N が回答に出るブロックの番号\n"
+            "指摘する：気になるブロックを押し、札とひとことを付ける\n"
+            "貼る：" + paste
+        )
+        examples = (
+            "指摘の例：ブロック 3 に札「短くする」を付け、ひとことで「1文にする」と書く\n"
+            "良い所の例：ブロック 5 に札「ここは良い」を付け、残してよい所も伝える"
+        )
+        glossary = (
+            "ブロック：原稿を空行などで区切った1かたまり。頁の番号 #N はその順番\n"
+            "札：指摘の種類を表す短い印（削る・短くする・言い換える など）"
+        )
+    else:
+        walk = (
+            "読む：原稿を上から読む。段落の番号は回答に出る番号と同じ\n"
+            "直す：段落を押して書き換える。差分と完成形のタブで確かめる\n"
+            "貼る：" + paste
+        )
+        examples = (
+            "直しの例：段落 3 の「と思われる」を「である」に書き換える\n"
+            "削除の例：段落 7 を削除する（取り消し線で残る）"
+        )
+        glossary = (
+            "ブロック：原稿を空行などで区切った1かたまり。頁の番号 #N はその順番\n"
+            "完成形：直した後の原稿の全文（添削の回答に入る）"
+        )
+    return {
+        "summary": (
+            "Goal：原稿「%s」を読んで、%s\n"
+            "Now：原稿 %d 行・%d 文字・%d ブロックを頁に載せた\n"
+            "Next：%sを入れて、画面の回答文を会話へ貼り付ける" % (label, verb, lines, chars, blocks, word)
+        ),
+        "walkthrough": walk,
+        "examples": examples,
+        "progress": (
+            "いま：原稿を読み込んだ（%d ブロック）\n次：あなたが%sを入れて回答文を貼る" % (blocks, word)
+        ),
+        "visual": {
+            "diagram_text": (
+                "原稿 -> %s : 気になるブロックを押す\n%s -> 回答文 : 札や書き換えが集まる\n"
+                "回答文 -> 会話 : 貼り付ける" % (word, word)
+            )
+        },
+        "details": [{
+            "summary": "原稿のファイル情報",
+            "text": "場所：%s ／ 行数：%d ／ 文字数：%d ／ ハッシュの先頭8桁：%s ／ モード：%s"
+                    % (path, lines, chars, sha8, word),
+        }],
+        "glossary": glossary,
+        "evidence": "実測：原稿 %d 行 %d 文字 %d ブロック｜%s" % (lines, chars, blocks, path),
+        "decision": {"groups": [
+            {"legend": "直した後の扱い", "kind": "radio", "options": [
+                {"label": "反映して続ける", "recommended": True,
+                 "pros": "入れた%sをそのまま原稿に反映し、次の作業へ進める" % word,
+                 "cons": "反映の結果をもう一度見ずに進む"},
+                {"label": "もう一往復見せる",
+                 "pros": "反映した原稿を見て、もう一度%sを入れられる" % word,
+                 "cons": "確認の往復が1回増える"},
+            ]},
+            {"legend": "自由記述", "kind": "free", "placeholder": "直しの方針・追加の条件など"},
+        ]},
+    }
+
+
+def _manuscript_frame_defaults(spec):
+    """原稿の頁で欠けた部品を短い既定で埋める。返るもの＝(定義の写し, 知らせの行の一覧)。止めない。
+
+    対象＝summary・walkthrough・examples・progress・visual・details・glossary・evidence・decision。
+    部品が「節の一覧にある」か「content にあり components に載っている」なら足さない。
+    ⚠️overview（一言でいうと）は書き手の責任＝足さず、無ければ強く警告する（無いと検品で落ちる）。
+    ⚠️原稿の無い定義は何もしない（そのまま返す）。
+    """
+    content = spec.get("content") if isinstance(spec, Mapping) else None
+    manuscript = _manuscript_of(content)
+    if manuscript is None:
+        return spec, []
+    components = list(spec.get("components", ()))
+    content2 = dict(content)
+    placed = set()
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if not isinstance(entry, Mapping):
+                continue
+            name = str(entry.get("component", "")).strip()
+            value = entry.get("content")
+            if value is None:
+                value = content.get(name)
+            if name and value is not None:
+                placed.add(name)
+    notes = []
+    defaults = _manuscript_defaults(manuscript)
+    for name in ALL_COMPONENTS:
+        if name == "overview":
+            if "overview" not in placed and not content.get("overview"):
+                notes.append(
+                    "⚠️overview（%s）が無い＝書き手が書く部品で、この道具は足さない。"
+                    "無いと検品で落ちる・差し戻される" % COMPONENT_LABELS["overview"]
+                )
+            continue
+        if name in placed:
+            continue
+        existing = content2.get(name)
+        if existing and name in components:
+            continue
+        label = COMPONENT_LABELS.get(name, name)
+        if existing:
+            components.append(name)
+            notes.append("ⓘ 原稿の頁＝%s（%s）が components に無かったので足した" % (name, label))
+            continue
+        content2[name] = defaults[name]
+        if name not in components:
+            components.append(name)
+        notes.append("ⓘ 原稿の頁の既定で足した: %s（%s）" % (name, label))
+    spec2 = dict(spec)
+    spec2["content"] = content2
+    spec2["components"] = components
+    return spec2, notes
+
+
+def _review_mode_of(value):
+    """content["review"]（文字列か {"mode": …}）を none｜shiteki｜tensaku｜both にする。読めなければ none。"""
+    if isinstance(value, Mapping):
+        value = value.get("mode")
+    if _review_normalize_mode is not None:
+        try:
+            return _review_normalize_mode(value)
+        except Exception:  # noqa: BLE001 - 相手の不具合で頁が組めなくならないように
+            pass
+    text = "" if value is None else str(value).strip()
+    text = _MODE_ALIASES.get(text, text.lower())
+    return text if text in REVIEW_MODES else "none"
+
+
+def _roles_of(mode):
+    return {"shiteki": ("shiteki",), "tensaku": ("tensaku",), "both": ("shiteki", "tensaku")}.get(mode, ())
+
+
+def _mode_of_roles(roles):
+    if "shiteki" in roles and "tensaku" in roles:
+        return "both"
+    return "shiteki" if "shiteki" in roles else ("tensaku" if "tensaku" in roles else "none")
+
+
+def apply_review_default(spec):
+    """content に review を決めて入れる。返るもの＝定義の写し（変えないときは同じ定義）。
+
+    review が無い＝説明の頁は REVIEW_DEFAULT（both）・原稿の頁は原稿の mode の役割だけ。
+    あるとき＝その値のまま。ただし原稿の頁で原稿の mode の役割が欠けていたら足す（必ず含める）。
+    """
+    content = spec.get("content") if isinstance(spec, Mapping) else None
+    if not isinstance(content, Mapping):
+        return spec
+    manuscript = _manuscript_of(content)
+    current = content.get("review", _MISSING)
+    if current is _MISSING:
+        new = manuscript["mode"] if manuscript else REVIEW_DEFAULT
+    else:
+        mode = _review_mode_of(current)
+        roles = set(_roles_of(mode))
+        if manuscript:
+            roles.add(manuscript["mode"])
+        new_mode = _mode_of_roles(roles)
+        if new_mode == mode:
+            return spec
+        new = dict(current, mode=new_mode) if isinstance(current, Mapping) else new_mode
+    content2 = dict(content)
+    content2["review"] = new
+    spec2 = dict(spec)
+    spec2["content"] = content2
+    return spec2
+
+
+def prepare_spec(spec, project_root=None):
+    """定義を組む前の下ごしらえ。返るもの＝(定義の写し, 知らせの行の一覧)。
+
+    順＝原稿の読み込み → 欠けた部品の既定 → 赤ペンの役割。原稿が読めなければ ManuscriptError。
+    何度かけても同じ結果（build からも呼ぶ）。
+    """
+    spec = resolve_manuscripts(spec, project_root)
+    spec, notes = _manuscript_frame_defaults(spec)
+    spec = apply_review_default(spec)
+    manuscript = _manuscript_of(spec.get("content"))
+    if manuscript is not None:
+        notes.append(
+            "ⓘ 原稿の頁: 「%s」（%s・%s）の赤ペンは %s" % (
+                manuscript["label"], manuscript["source_path"], _MODE_WORDS[manuscript["mode"]],
+                _review_mode_of(spec["content"].get("review")),
+            )
+        )
+    return spec, notes
+
+
 def build(spec, project_root=None):
     """定義から頁を組み、承認済みの置き場へ2つ書き出す。返るもの＝(完全版, 器用) のpath。"""
+    # 2026-10-09：原稿の節の読み込みと赤ペンの既定（main が先に済ませていれば何も変わらない）。
+    spec = resolve_manuscripts(spec, project_root)
+    spec = apply_review_default(spec)
     plan = ExplanationPlan(
         audience="project_novice",
         depth=spec.get("depth", "deep"),
@@ -460,14 +865,41 @@ def record_codex_receipt(
     )
 
 
+def without_manuscript(text):
+    """頁のHTMLから、原稿の節（`<section data-component="manuscript"…>` から対の閉じまで）を外す。
+
+    2026-10-09：原稿は利用者の文章そのもの＝部品の濃さ・空の強調・本文に残った ** の検査の対象ではない。
+    入れ子の section があっても、開きと閉じを数えて対の閉じまでを外す。節が無ければそのまま返す。
+    """
+    start = text.find('<section data-component="manuscript"')
+    if start < 0:
+        return text
+    depth = 0
+    position = start
+    while True:
+        opened = text.find("<section", position)
+        closed = text.find("</section>", position)
+        if closed < 0:
+            return text[:start]
+        if 0 <= opened < closed:
+            depth += 1
+            position = opened + len("<section")
+        else:
+            depth -= 1
+            position = closed + len("</section>")
+            if depth <= 0:
+                return text[:start] + text[position:]
+
+
 def density(text):
     """組み上がった頁で、どの部品がいくつ使われたかを数える。
 
     入れるもの＝完全版のHTML。返るもの＝`(部品名, 個数)` の並び。
     ⚠️CSSの定義に同じ語が出るので、本文（`<body>` 以降）だけを数える。
+    ⚠️原稿の節（部品 manuscript）は数えない（利用者の原稿の表や引用が部品の濃さに混ざらないように）。
     """
     start = text.find("<body>")
-    body = text[start:] if start >= 0 else text
+    body = without_manuscript(text[start:] if start >= 0 else text)
     marks = (
         ("図解", "dia-wrap"),
         ("カード", "card-stack"),
@@ -707,7 +1139,21 @@ def _group_rows(group, kind):
     行が1つも無い群は <fieldset> に入力欄が無く、回答文の問いにも数えられない
     （2026-10-09：以前はここだけ数えていて、空の群があると番号が1つずれた）。
     """
-    return group.get("items", ()) if kind == "scale" else group.get("options", ())
+    rows = group.get("items", ()) if kind == "scale" else group.get("options", ())
+    if kind in ("radio", "checkbox") and isinstance(rows, (list, tuple)):
+        # 2026-10-09：取り下げた選択肢（withdrawn）は選べない行＝問いの番号にも行の数にも数えない。
+        rows = [row for row in rows if not _is_withdrawn(row)]
+    return rows
+
+
+def _is_withdrawn(option):
+    """判断の選択肢が取り下げ済みか（"withdrawn": true か、理由の文字列）。辞書の選択肢だけ。"""
+    if not isinstance(option, Mapping):
+        return False
+    value = option.get("withdrawn")
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
 
 
 def decision_option_warnings(content):
@@ -720,6 +1166,8 @@ def decision_option_warnings(content):
     かつ why に「利点」を含まないものを1行ずつ（文字列の選択肢は利点を書けないので必ず数える）。
     選択肢が2つ以上あって全部が文字列の群は、群ごとに1行（推奨の印も利点も付かない形）。
     scale・number・free は対象外。
+    2026-10-09：取り下げた選択肢（withdrawn）は数えない（利点の有無も見ない）。生きた選択肢が1つに
+    なった問いは「取り下げで残り1つ」と1行警告する（実質1択）。
     ⚠️2026-10-08（リード）：計画では文字列だけの群を対象外にしていたが、置き場の定義47本を
       測ると選択の群78のうち76が文字列だけで、警告が1件も出ない＝案1が効かない形だった。
       文字列の選択肢は render_components._decision_parts で推奨にならない（「推奨を入れる」の
@@ -740,9 +1188,17 @@ def decision_option_warnings(content):
             number += 1
             if kind in ("scale", "number"):
                 continue
-            options = group.get("options", ())
-            if not isinstance(options, (list, tuple)):
+            all_options = group.get("options", ())
+            if not isinstance(all_options, (list, tuple)):
                 continue
+            options = [o for o in all_options if not _is_withdrawn(o)]
+            if len(options) == 1 and len(all_options) > 1:
+                lines.append(
+                    "⚠️取り下げで残り1つ（止めはしない）: Q%d「%s」＝生きた選択肢が「%s」だけ"
+                    "＝実質1択。問いにする意味があるか見直す"
+                    % (number, _short(group.get("legend", "選択肢")),
+                       _short(options[0].get("label", "") if isinstance(options[0], Mapping) else options[0]))
+                )
             dicts = [o for o in options if isinstance(o, Mapping)]
             if len(options) >= 2 and not dicts:
                 lines.append(
@@ -783,7 +1239,8 @@ def decision_option_warnings(content):
 # ⚠️定義の中を歩くときは正規表現でなく索引と再帰で切り出す（この repo の決まり）。
 # ---------------------------------------------------------------------------
 # 文字列を見ない鍵＝中身が散文でなく、** や図番号を探す対象でないもの。
-TEXT_SKIP_KEYS = frozenset(("log", "diff", "tex", "svg", "path", "deck", "target", "selector"))
+# 2026-10-09：markdown＝原稿の頁の原稿そのもの（読み込み後）。原稿の ** や図の番号は検査の対象にしない。
+TEXT_SKIP_KEYS = frozenset(("log", "diff", "tex", "svg", "path", "deck", "target", "selector", "markdown"))
 # 図番号（num）を持つ図の鍵。節の num と箱の num は数えない。
 FIGURE_KEYS = ("diagram", "svg", "image", "screenshot", "timeline", "quadrant", "venn", "flow",
                "score", "chart")
@@ -1006,16 +1463,68 @@ def _asks_number(item):
     return number if number > 0 else None
 
 
-def asks_format_warnings(content):
-    """sections の各項目の asks（その節に関わる問いの番号の配列）の形を見て、警告の一覧を返す。
+def _box_asks_unreadable(value):
+    """図の箱の asks（1・"Q1"・"1/2"・それらの配列）のうち、問いの番号として読めない要素を返す。"""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    bad = []
+    for item in items:
+        pieces = [item]
+        if isinstance(item, str):
+            pieces = [part for part in item.replace("／", "/").split("/")]
+        for piece in pieces:
+            if _asks_number(piece.strip() if isinstance(piece, str) else piece) is None:
+                bad.append(piece)
+    return bad
 
-    ⚠️asks は sections の一覧の形でだけ効く。配列でない・読めない要素は組む側が黙って捨てる
-    ので、ここで知らせる（止めはしない）。
+
+def _box_asks_warnings(content):
+    """図の箱に書いた asks の読めない値を警告する（止めはしない）。
+
+    2026-10-09：箱の角に問いの番号札（Q1）が付く。diagram の nodes と、1行記法 diagram_text の
+    A(asks=1/2) を見る。読めない要素は組む側が黙って捨てるので、ここで知らせる。
     """
     lines = []
+
+    def check(boxes, heading, kind):
+        for box in boxes:
+            if not isinstance(box, Mapping):
+                continue
+            for key in ("asks", "ask"):
+                if key not in box:
+                    continue
+                for piece in _box_asks_unreadable(box[key]):
+                    title = box.get("title") or box.get("label") or box.get("id") or ""
+                    lines.append(
+                        "⚠️図の箱の %s に問いの番号として読めない値がある（止めはしない）: 「%s」の %s の箱「%s」の %s %s"
+                        "＝1・\"Q1\"・\"1/2\" のように1以上の整数で書く（読めない値は捨てられる）"
+                        % (key, _short(heading), kind, _short(title), key, _short(repr(piece)))
+                    )
+
+    for heading, component, value in _section_places(content):
+        for _path, key, node in _nodes(value, "", component):
+            if isinstance(node, Mapping) and key != "flow" and isinstance(node.get("nodes"), (list, tuple)):
+                check(node["nodes"], heading, "diagram")
+            elif key == "diagram_text" and isinstance(node, str) and _parse_diagram_text is not None:
+                try:
+                    parsed = _parse_diagram_text(node)
+                except Exception:  # noqa: BLE001 - 1行記法の不具合は asks の検査の外
+                    continue
+                check(parsed.get("nodes", ()), heading, "diagram_text")
+    return lines
+
+
+def asks_format_warnings(content):
+    """asks（問いの番号）の形を見て、警告の一覧を返す。
+
+    見る場所＝sections の各項目の asks（その節に関わる問いの番号の配列）と、
+    図の箱の asks（2026-10-09・1・"Q1"・"1/2"・それらの配列）。
+    ⚠️sections の asks は sections の一覧の形でだけ効く。配列でない・読めない要素は組む側が
+    黙って捨てるので、ここで知らせる（止めはしない）。
+    """
+    lines = _box_asks_warnings(content) if isinstance(content, Mapping) else []
     sections = content.get("sections") if isinstance(content, Mapping) else None
     if not isinstance(sections, (list, tuple)):
-        return lines
+        return _limit_lines(lines)
     for entry in sections:
         if not isinstance(entry, Mapping) or "asks" not in entry:
             continue
@@ -1135,6 +1644,8 @@ def rendered_warnings(html):
     cut = body.find("<script")
     if cut >= 0:
         body = body[:cut]
+    # 2026-10-09：原稿の節（利用者の文章そのもの）は、**・空の強調・図の下の注意の検査から外す。
+    body = without_manuscript(body)
     lines = []
     for block in _all_between(body, '<ul class="dia-warn">', "</ul>"):
         for item in _all_between(block, "<li>", "</li>"):
@@ -1177,7 +1688,7 @@ def rendered_warnings(html):
             missing.append(digits)
     for digits in missing:
         lines.append(
-            "⚠️見出しの「→ Q%s」の飛び先（#q-%s）が頁に無い（止めはしない）"
+            "⚠️見出しや図の「Q%s」の飛び先（#q-%s）が頁に無い（止めはしない）"
             "＝asks の番号が問いの数を超えている" % (digits, digits)
         )
     return _limit_lines(lines)
@@ -1231,14 +1742,47 @@ class _TextOnly(HTMLParser):
         self.cells = 0
         self.in_pc = 0
         self.after_bold = False
+        # 2026-10-09：data-blk の要素（原稿のブロック・説明の頁の単位）の最初の行に「#N 」を付け、
+        # 取り下げた選択肢（class withdrawn）の行頭に「[取り下げ] 」を付ける。
+        self.blks = []
+        self.saw_blk = False
+        self.withdrawn_pending = False
+        # 原稿のコードブロック（data-ms-type="code"）だけは、行と字下げをそのまま残す。
+        self.code_text = ""
+
+    def _emit_code_lines(self):
+        """溜めたコードの文字を、行ごと・字下げのまま出す（最初の空でない行へ「#N 」を付ける）。"""
+        text, self.code_text = self.code_text, ""
+        for line in text.split(NL):
+            line = line.rstrip()
+            prefix = ""
+            if line:
+                for blk in self.blks:
+                    if not blk["used"]:
+                        blk["used"] = True
+                        prefix = "#%s " % blk["n"]
+                        break
+            self.lines.append(prefix + line)
 
     # 行の組み立て
     def _flush(self):
+        if self.code_text:
+            self._emit_code_lines()
         text = " ".join("".join(self.buf).split())
         self.buf = []
         if not text:
             return
-        self.lines.append(self.prefix + text)
+        prefix = self.prefix
+        if self.withdrawn_pending:
+            self.withdrawn_pending = False
+            if not text.startswith("[取り下げ]"):
+                prefix = "[取り下げ] " + prefix
+        for blk in self.blks:
+            if not blk["used"]:
+                blk["used"] = True
+                prefix = "#%s " % blk["n"] + prefix
+                break
+        self.lines.append(prefix + text)
         self.prefix = ""
 
     def _blank(self):
@@ -1253,6 +1797,8 @@ class _TextOnly(HTMLParser):
 
     def finish(self):
         self._flush()
+        if self.code_text:
+            self._emit_code_lines()
 
     @staticmethod
     def _input_marker(attrs, classes):
@@ -1272,10 +1818,35 @@ class _TextOnly(HTMLParser):
         return "[記入欄: %s]" % hint if hint else "[記入欄]"
 
     # svg は中身を捨てて、題と文字だけにする
+    @staticmethod
+    def _number(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     def _svg_start(self, tag, attrs):
         svg = self.svg
         svg["depth"] += 1
-        if tag == "title" and not svg["title"]:
+        attrs = dict(attrs)
+        classes = set((attrs.get("class") or "").split())
+        # 2026-10-09：図の箱の角の問いの番号札（<a class="dia-q">）は、題や文字に混ぜず別に溜める。
+        # 札は箱の外に並ぶので、円の中心がどの箱の枠に入るかで箱の題に結び付ける（_emit_svg）。
+        if tag == "a" and "dia-q" in classes:
+            svg["badge"] = {"depth": svg["depth"], "label": "", "cx": None, "cy": None}
+            return
+        badge = svg["badge"]
+        if tag == "circle" and badge is not None and "dia-q-dot" in classes:
+            badge["cx"] = self._number(attrs.get("cx"))
+            badge["cy"] = self._number(attrs.get("cy"))
+            return
+        if tag == "rect":
+            svg["rects"].append({
+                "x": self._number(attrs.get("x")), "y": self._number(attrs.get("y")),
+                "w": self._number(attrs.get("width")), "h": self._number(attrs.get("height")),
+                "text_at": len(svg["texts"]),
+            })
+        if tag == "title" and not svg["title"] and badge is None:
             svg["in_title"] = True
             svg["title_chunks"] = []
         elif tag == "text":
@@ -1296,12 +1867,60 @@ class _TextOnly(HTMLParser):
         elif tag == "text" and svg["chunks"] is not None:
             text = _join_wrapped(svg["chunks"])
             svg["chunks"] = None
-            if text:
+            if text and svg["badge"] is not None:
+                svg["badge"]["label"] = text
+            elif text:
                 svg["texts"].append(text)
+        elif tag == "a" and svg["badge"] is not None and svg["badge"]["depth"] == svg["depth"]:
+            svg["badges"].append(svg["badge"])
+            svg["badge"] = None
         svg["depth"] -= 1
         if svg["depth"] == 0:
             self._emit_svg()
             self.svg = None
+
+    @staticmethod
+    def _with_question_badges(svg):
+        """箱の題の後ろへ「[Q1]」を付けた文字の一覧を返す（読み手が図と問いの対応を追えるように）。
+
+        札の円の中心が入る枠（いちばん小さいもの）を箱とみなし、その枠の次の文字（箱の題）に付ける。
+        どの箱にも結び付かない札は、最後に「問い Q1・Q2」の1項目にまとめる。
+        """
+        texts = list(svg["texts"])
+        rects = svg["rects"]
+        notes = {}
+        loose = []
+        for badge in svg["badges"]:
+            label = badge["label"]
+            if not label:
+                continue
+            host = None
+            cx, cy = badge["cx"], badge["cy"]
+            if cx is not None and cy is not None:
+                best = None
+                for index, rect in enumerate(rects):
+                    x, y, w, h = rect["x"], rect["y"], rect["w"], rect["h"]
+                    if None in (x, y, w, h) or not (x <= cx <= x + w and y <= cy <= y + h):
+                        continue
+                    if best is None or w * h < best[0]:
+                        best = (w * h, index)
+                if best is not None:
+                    host = best[1]
+            title_at = None
+            if host is not None:
+                start = rects[host]["text_at"]
+                stop = rects[host + 1]["text_at"] if host + 1 < len(rects) else len(texts)
+                if start < stop and start < len(texts):
+                    title_at = start
+            if title_at is None:
+                loose.append(label)
+            else:
+                notes.setdefault(title_at, []).append(label)
+        for index, labels in notes.items():
+            texts[index] = texts[index] + " " + "".join("[%s]" % label for label in labels)
+        if loose:
+            texts.append("問い " + "・".join(loose))
+        return texts
 
     def _emit_svg(self):
         svg = self.svg
@@ -1310,6 +1929,7 @@ class _TextOnly(HTMLParser):
             if texts:
                 self.buf.append(" [画像の印: %s] " % "／".join(texts))
             return
+        texts = self._with_question_badges(svg)
         title = svg["title"] or " ".join(svg["label"].split())
         body = "／".join(texts)
         if len(body) > 400:
@@ -1331,6 +1951,20 @@ class _TextOnly(HTMLParser):
             return
         attrs = dict(attrs)
         classes = set((attrs.get("class") or "").split())
+        # 番号つきの単位の始まり。前の行を先に出し、この要素の最初の行へ「#N 」を付ける。
+        blk_number = (attrs.get("data-blk") or "").strip()
+        if blk_number:
+            self._flush()
+            self.blks.append({
+                "n": blk_number, "tag": tag, "depth": 1, "used": False,
+                "code": (attrs.get("data-ms-type") or "") == "code",
+            })
+            self.saw_blk = True
+        elif self.blks and tag == self.blks[-1]["tag"]:
+            self.blks[-1]["depth"] += 1
+        if "withdrawn" in classes:
+            self._flush()
+            self.withdrawn_pending = True
         # 太字の見出し語の直後の span は、空白なしで続くと語と溶ける（<b>GOAL</b><span>…）。
         if self.after_bold and tag == "span":
             self.buf.append(" ")
@@ -1340,11 +1974,12 @@ class _TextOnly(HTMLParser):
                 "depth": 1, "title": "", "title_chunks": [], "in_title": False,
                 "label": attrs.get("aria-label") or "", "classes": classes,
                 "texts": [], "chunks": None,
+                "rects": [], "badges": [], "badge": None,
             }
             return
         if (tag in self.DROP or tag == "textarea" or attrs.get("id") == "decision-prompt"
                 or "decision-actions" in classes):
-            if tag == "textarea":
+            if tag == "textarea" and "ms-source" not in classes:
                 self.buf.append("[自由記述欄]")
             self.drop_tag = tag
             self.drop_depth = 1
@@ -1406,6 +2041,14 @@ class _TextOnly(HTMLParser):
         self.stack.append((tag, suffix, kind))
 
     def handle_endtag(self, tag):
+        skipped = bool(self.drop_depth) or self.svg is not None
+        self._end_tag(tag)
+        if not skipped and self.blks and tag == self.blks[-1]["tag"]:
+            self.blks[-1]["depth"] -= 1
+            if self.blks[-1]["depth"] <= 0:
+                self.blks.pop()
+
+    def _end_tag(self, tag):
         if self.drop_depth:
             if tag == self.drop_tag:
                 self.drop_depth -= 1
@@ -1450,6 +2093,9 @@ class _TextOnly(HTMLParser):
             self._svg_data(data)
             return
         self.after_bold = False
+        if self.blks and self.blks[-1]["code"]:
+            self.code_text += data
+            return
         self.buf.append(data)
 
 
@@ -1475,7 +2121,8 @@ def text_only(html, name=""):
     while lines and lines[-1] == "":
         lines.pop()
     origin = "。元の頁: %s.html" % name if name else ""
-    header = "（文字だけの版＝画像・図・script・style を外した本文。〔用語〕はホバーで説明の付く語%s）" % origin
+    numbered = "。行頭の #N は番号つきの単位（原稿のブロックなど）＝回答の指摘の番号と同じ" if parser.saw_blk else ""
+    header = "（文字だけの版＝画像・図・script・style を外した本文。〔用語〕はホバーで説明の付く語%s%s）" % (origin, numbered)
     return header + NL + NL + NL.join(lines) + NL
 
 
@@ -1619,6 +2266,15 @@ def main(argv):
         print(__doc__)
         return 2
     spec = json.loads(io.open(positional[0], encoding="utf-8").read())
+    # 2026-10-09（指摘と添削の作り込み）：原稿の節を読み、欠けた部品の既定を足し、赤ペンの役割を決める。
+    # 原稿が読めなければ組み立てを止める（唯一の止める理由＝原稿が無いと頁の中身が無い）。
+    try:
+        spec, prepare_notes = prepare_spec(spec, project_root)
+    except ManuscriptError as exc:
+        print("⚠️原稿を読めない＝組み立てを止めた: " + str(exc))
+        return 2
+    for note in prepare_notes:
+        print(note)
     # ⚠️頁を作り終えてから応答を書くので、応答の言葉で要求部品が**後から増える**。
     #   7部品で作った頁が、応答に「比較」「決めて」が出ただけで差し戻された実例あり
     #   （2026-08-29）。∴既定は9部品すべて。欠けていたら助言だけ出す（止めはしない）。
@@ -1734,10 +2390,11 @@ def main(argv):
         lines.append("")
         lines.extend(rendered)
     counts = density(built)
-    body_bytes = len(built.encode("utf-8"))
+    body_bytes = len(without_manuscript(built).encode("utf-8"))
     lines.append("")
     lines.append("部品の濃さ: " + " ".join("%s=%d" % (n, c) for n, c in counts))
-    advice = advise_density(counts, body_bytes)
+    # 2026-10-09：原稿の頁の濃さは原稿が決める（既定で足した枠は薄くてよい）＝助言は出さない。
+    advice = [] if _manuscript_of(spec.get("content")) is not None else advise_density(counts, body_bytes)
     if advice:
         lines.append("⚠️薄い頁に見える（止めはしない）:")
         for item in advice:

@@ -9,6 +9,26 @@ from .glossary import GlossaryEntry
 from .render_components import DECISION_SCRIPT
 from .term_boundary import contains_term, find_term
 
+# 2026-10-09（指摘と添削の作り込み）：頁に載せてよい script は3本＝判断欄・指摘・添削。
+# 使う頁にだけ載る（部分集合）・各1本まで・判断欄が先頭で、あとは ROLE_ORDER の順。
+# ⚠️指摘・添削の script は別のモジュール（review_scripts）が正本。取り込めないとき（まだ無い・古い配布）は
+#   判断欄だけを認める＝今までと同じ動き。
+try:
+    from .review_scripts import SHITEKI_SCRIPT, TENSAKU_SCRIPT
+except ImportError:  # pragma: no cover - 相手のモジュールが無い環境
+    SHITEKI_SCRIPT = None
+    TENSAKU_SCRIPT = None
+
+APPROVED_SCRIPTS = tuple(
+    pair
+    for pair in (
+        ("decision", DECISION_SCRIPT),
+        ("shiteki", SHITEKI_SCRIPT),
+        ("tensaku", TENSAKU_SCRIPT),
+    )
+    if pair[1]
+)
+
 
 _VOID_TAGS = {
     "area",
@@ -238,11 +258,19 @@ class _ArtifactParser(HTMLParser):
                 or bool(re.search(r"(?:display|visibility)\s*:\s*(?:none|hidden)", style))
                 or bool(re.search(r"opacity\s*:\s*0(?:\D|$)", style))
             ),
+            # 原稿の頁（2026-10-09）：data-prose="raw" の中は原稿の文字そのもの。用語の包装も
+            # コード書きの語の検査も求めない（原稿の語を勝手に包まないため）。
+            "raw": values.get("data-prose", "").strip().lower() == "raw",
             "text": [],
         }
         if not item["tooltip"]:
             self._flush_run()
         self.stack.append(item)
+        if item["raw"] and not any(
+            ancestor.get("tag") == "section" and ancestor.get("component") == "manuscript"
+            for ancestor in self.stack[:-1]
+        ):
+            self.errors.append("raw prose is only allowed inside the manuscript section")
 
         element_id = values.get("id", "").strip()
         if element_id:
@@ -393,6 +421,8 @@ class _ArtifactParser(HTMLParser):
             return
         if self._inside(lambda item: bool(item.get("hidden"))):
             return
+        if self._inside(lambda item: bool(item.get("raw"))):
+            return
         if self._inside(lambda item: item.get("tag") in _EXCLUDED_VISIBLE_TAGS):
             return
         if inside_tooltip:
@@ -412,7 +442,8 @@ class _ArtifactParser(HTMLParser):
         if tag == "code" and self.code_stack:
             frame = self.code_stack.pop()
             text = "".join(str(part) for part in frame["text"]).strip()
-            self.code_identifiers.append((text, bool(frame["tooltip"])))
+            if not self._inside(lambda item: bool(item.get("raw"))):
+                self.code_identifiers.append((text, bool(frame["tooltip"])))
             # ⚠️2026-09-01の裁定＝コード書きの中は本文ではないので**包装を求めない**。
             #   （以前はここで求めており、道筋に用語が混ざるだけで検品が落ちていた。）
         if tag == "tr" and self.current_evidence is not None:
@@ -462,11 +493,29 @@ class _ArtifactParser(HTMLParser):
         for ref in self.describedby:
             if ref not in self.ids:
                 self.errors.append(f"aria-describedby target is missing: {ref}")
-        if len(self.scripts) > 1:
+        self._check_scripts()
+
+    def _check_scripts(self) -> None:
+        """script の検査（2026-10-09）。3本（判断欄・指摘・添削）の部分集合だけを、各1本・並び順どおりに認める。
+
+        ⚠️文言は既存の試験が読む＝「multiple inline scripts are not allowed」（上限の3本を超える）と
+        「unapproved inline script is not allowed」（承認した本文と1字でも違う・JSON の script も含む）。
+        """
+        if len(self.scripts) > len(APPROVED_SCRIPTS):
             self.errors.append("multiple inline scripts are not allowed")
+        by_text = {script.strip(): role for role, script in APPROVED_SCRIPTS}
+        order = [role for role, _ in APPROVED_SCRIPTS]
+        found: list[str] = []
         for script in self.scripts:
-            if script != DECISION_SCRIPT.strip():
+            role = by_text.get(script)
+            if role is None:
                 self.errors.append("unapproved inline script is not allowed")
+            elif role in found:
+                self.errors.append(f"duplicate inline script: {role}")
+            else:
+                found.append(role)
+        if found and (found[0] != "decision" or found != sorted(found, key=order.index)):
+            self.errors.append("decision script must come first")
 
 
 def inspect_artifact_html(

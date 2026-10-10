@@ -65,6 +65,9 @@ CHAR_EM_ASCII_UPPER = 0.68
 CHAR_EM_WIDE = 1.0
 # 箱に記号（icon）があるとき、描く側は本文を 22px 右へずらす（render_components.py の text_indent）。
 ICON_INDENT = 22.0
+# 2026-10-09：箱の右上に置く問いの番号札（「Q1」の丸・直径20px・間隔4px）1つぶんの幅。
+# 札は箱の中の右上に重なるので、箱の幅に札の数だけ足して題と重ならないようにする。
+Q_BADGE_W = 24.0
 
 DEFAULT_MAX_COLS = 3
 DEFAULT_FONT_PX = 14
@@ -126,6 +129,8 @@ class Box:
     tone: str
     icon: str
     node_index: int
+    # 2026-10-09：箱の右上に札を出す問いの番号（`asks`）。描くのは呼び出し側。
+    asks: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -326,7 +331,7 @@ def _wrap_to_width(text: str, max_px: float, px_per_em: float) -> list[str]:
 def _refit_to_width(box: dict, width: float) -> None:
     """箱の幅を width に決めたあと、題・本文・注記をその幅に入るよう折り直し、高さを測り直す。"""
     font_px = float(box.get("_font_px", DEFAULT_FONT_PX))
-    extra = ICON_INDENT if box.get("icon") else 0.0
+    extra = (ICON_INDENT if box.get("icon") else 0.0) + float(box.get("_badge_w", 0.0))
     content_w = width - PAD_X * 2 - extra
     num = box.get("num") or ""
     title_budget = content_w - (_line_em_width(num) * font_px * TITLE_SCALE + 8.0 if num else 0.0)
@@ -334,7 +339,8 @@ def _refit_to_width(box: dict, width: float) -> None:
     box["body_lines"] = _wrap_to_width(box.get("_raw_text", ""), content_w, font_px * BODY_SCALE)
     box["note_lines"] = _wrap_to_width(box.get("_raw_note", ""), content_w, font_px * NOTE_SCALE)
     _, height = _measure(
-        box["title_lines"], box["body_lines"], box["note_lines"], num, box.get("icon", ""), font_px
+        box["title_lines"], box["body_lines"], box["note_lines"], num, box.get("icon", ""), font_px,
+        badge_w=float(box.get("_badge_w", 0.0)),
     )
     box["w"] = width
     box["h"] = height
@@ -347,6 +353,7 @@ def _measure(
     num: str,
     icon: str,
     font_px: float,
+    badge_w: float = 0.0,
 ) -> tuple[float, float]:
     title_size = font_px * TITLE_SCALE
     body_size = font_px * BODY_SCALE
@@ -359,6 +366,7 @@ def _measure(
         extra += _line_em_width(num) * title_size + 8.0
     if icon:
         extra += ICON_INDENT
+    extra += badge_w
     content_w = max(widths) if widths else 0.0
     width = max(content_w + extra + PAD_X * 2, MIN_BOX_W)
     height = (
@@ -374,6 +382,19 @@ def _measure(
 # ---------------------------------------------------------------------------
 # 箱の下ごしらえ
 # ---------------------------------------------------------------------------
+
+def _safe_asks(value: object) -> list[int]:
+    """箱の `asks`（問いの番号）を正の整数の一覧にする（呼び出し側が直した形を渡すのが基本）。"""
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            continue
+        if item not in result:
+            result.append(item)
+    return result
+
 
 def _prepare_nodes(nodes: Sequence[object], font_px: float) -> tuple[list[dict], dict[str, int]]:
     """入力の nodes を、置き場所を決める前の下ごしらえ（大きさ・行）に直す。
@@ -394,10 +415,16 @@ def _prepare_nodes(nodes: Sequence[object], font_px: float) -> tuple[list[dict],
         num = _stringify(item.get("num"))
         icon = _stringify(item.get("icon"))
         tone = _stringify(item.get("tone") or "neutral").lower()
+        asks = _safe_asks(item.get("asks"))
+        # 中央揃えの題は箱の両側に同じ余白を取るので、札の幅は両側ぶん見込む（右上の札と重ならない）。
+        centered = _stringify(item.get("align")).strip().lower() == "center"
+        badge_w = len(asks) * Q_BADGE_W * (2.0 if centered else 1.0)
         title_lines = _wrap(title, TITLE_MAX_CHARS)
         body_lines = _wrap(text, BODY_MAX_CHARS)
         note_lines = _wrap(note, BODY_MAX_CHARS)
-        width, height = _measure(title_lines, body_lines, note_lines, num, icon, font_px)
+        width, height = _measure(
+            title_lines, body_lines, note_lines, num, icon, font_px, badge_w=badge_w
+        )
         prepared.append(
             {
                 "index": index,
@@ -408,6 +435,8 @@ def _prepare_nodes(nodes: Sequence[object], font_px: float) -> tuple[list[dict],
                 "note_lines": note_lines,
                 "tone": tone,
                 "icon": icon,
+                "asks": asks,
+                "_badge_w": badge_w,
                 "w": width,
                 "h": height,
                 "x": 0.0,
@@ -1947,6 +1976,7 @@ def _layout_diagram_core(
             tone=b["tone"],
             icon=b["icon"],
             node_index=b["index"],
+            asks=list(b.get("asks", [])),
         )
         for b in boxes
     ]

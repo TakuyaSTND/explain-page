@@ -206,6 +206,34 @@ def strip_tags(html):
     return ''.join(buf)
 
 
+def without_manuscript(html):
+    """原稿の節（`<section data-component="manuscript"` から対の閉じまで）を外す。
+
+    2026-10-09：原稿の頁の原稿は利用者の文章そのもの（data-prose="raw"）で、語を包む対象ではない。
+    ③の参考（本文に出ているが包んでいない語）に原稿の語を混ぜると、書き手に包む義務があるように
+    読めてしまうので、数えない。入れ子の section があっても、開きと閉じを数えて対の閉じまでを外す。
+    ⚠️正規表現を使わず索引で切る（この repo の決まり）。
+    """
+    start = html.find('<section data-component="manuscript"')
+    if start < 0:
+        return html
+    depth = 0
+    pos = start
+    while True:
+        opened = html.find('<section', pos)
+        closed = html.find('</section>', pos)
+        if closed < 0:
+            return html[:start]
+        if 0 <= opened < closed:
+            depth += 1
+            pos = opened + len('<section')
+        else:
+            depth -= 1
+            pos = closed + len('</section>')
+            if depth <= 0:
+                return html[:start] + html[pos:]
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     strict = '--strict' in sys.argv
@@ -242,7 +270,7 @@ def main():
         else:
             newterm.append((term, desc))
 
-    body = strip_tags(html)
+    body = strip_tags(without_manuscript(html))
     # ③参考＝用語集にあり本文に出ているが一度も包んでいない語。長い順に少しだけ。
     unwrapped = [t for t in g if len(t) >= 3 and t in body and t not in seen]
     unwrapped.sort(key=len, reverse=True)
