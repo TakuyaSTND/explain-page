@@ -116,7 +116,7 @@ const o=mk('div','rv-ui rv-out'),st=mk('p','rv-st'),ta=mk('textarea'),row=mk('di
 o.id='rv-out';o.hidden=true;o.setAttribute('role','dialog');o.setAttribute('aria-label','貼り付ける文章');
 ta.readOnly=true;ta.spellcheck=false;ta.setAttribute('aria-label','貼り付ける文章');
 async function copy(){
-ta.value=R.compose().join('\n');o.hidden=false;let ok=false;
+ta.value=R.compose().join('\n');o.hidden=false;o.style.bottom=(bar().offsetHeight+16)+'px';let ok=false;
 try{if(navigator.clipboard&&window.isSecureContext!==false){await navigator.clipboard.writeText(ta.value);ok=true;}}catch(e){}
 if(!ok){try{ta.focus();ta.select();ok=document.execCommand('copy');}catch(e){}}
 st.textContent=ok?'コピーしました。Claude Code のターミナルに貼り付けて Enter してください。':'下の欄を選択してコピーし、Claude Code に貼り付けてください。';
