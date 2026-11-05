@@ -14,6 +14,8 @@
 使い方:
   PYTHONUTF8=1 python .claude/scripts/render_page.py <頁の定義.json>
   PYTHONUTF8=1 python .claude/scripts/render_page.py <頁の定義.json> --runtime codex
+  PYTHONUTF8=1 python .claude/scripts/render_page.py --scaffold report|proposals [--name NAME] [--out PATH]
+                          頁の定義の雛形を出す（2026-10-31・利用者が選んだ S6）。「（…）」を書き換えて組む。
 
 引数:
   --runtime {none,codex}  既定 none。codex を付けると、完全版の頁について
@@ -32,6 +34,13 @@
                           ⚠️プラグインとして他のリポジトリに入れた時は、この引数で
                           そのプロジェクトの根を指す＝Claude Codeが `${CLAUDE_PROJECT_DIR}`
                           を渡す。
+  --no-fill               欠けた部品を既定で足さない（2026-10-15）。付けなければ、原稿でない頁でも
+                          欠けた部品を短い「該当なし」の既定で足し、足した部品を1つずつ
+                          「ⓘ 既定で足した: …」で知らせる。付けると従来どおり「⚠️部品が欠けている」の
+                          警告だけになる（原稿の頁の既定は、付けても付けなくても足す）。
+                          足さない部品＝overview（書き手が書く）と、reasons が名指しで求める部品
+                          （decision_required の decision・visual_comparison の visual・
+                          summary_requested の summary・multi_agent_review の progress）。
 
 定義ファイルの形（JSON・UTF-8）:
   {
@@ -77,6 +86,16 @@
   - "compare": {"before":…,"after":…,"labels":["前","後"]}（前後を切り替えて見る。JSは使わない）
   - "callouts": [{"n":1,"text":"…"}]（番号の吹き出し一覧）
   - "diagram_text": "A -> B : 条件" のような1行記法（`visual/diagram_dsl.py`）から図を組む
+  - 2026-11-04（利用者が選んだ A6・A4。形は `visual/figures.py`＝PDF も同じ計算で同じ配置）：
+    "mermaid": Mermaid の文字、または {"text":…,"num":…,"caption":…,"source":…}。読むのは流れ図
+      （flowchart・graph）・状態の図（stateDiagram）・やりとりの図（sequenceDiagram）。流れ図と状態の図は
+      箱と矢印の図（diagram）に変えて配置の計算に任せる。読めない行は捨てて図の下に注意書きで出す
+    "fishbone": {"effect":"結果","causes":[{"label":"分類","items":["原因",…],"tone":…},…]}（魚の骨＝原因の分類）
+    "waterfall": {"start":{"label","value"},"steps":[{"label","value"（正＝足す・負＝引く）},…],
+      "end":{"label"},"unit":"億円"}（滝の図＝足し引きの内訳。最後の棒は道具が足し引きして出す）
+    "dumbbell": {"rows":[{"label","before","after"},…],"unit":"…","labels":["いま","施策後"]}
+      （ダンベル＝いまの値と施策後の値。両方が数の行だけ描く＝値を作らない）
+    3型とも "num"・"caption"・"source" を受ける
   - "table" の "heat":[列番号,…] は数値セルの背景を段階的な濃さにし、
     "bars":[列番号,…] は数字の右に値/最大の細い棒を置く
   - 2026-10-01（手書きのHTMLとの比べから足した部品）：
@@ -184,6 +203,7 @@ from visual.section_labels import check_sections  # noqa: E402
 from visual.state import StateStore  # noqa: E402
 from visual.turn_marker import read_turn_marker  # noqa: E402
 from visual.visual_smoke import run_visual_smoke  # noqa: E402
+from visual.diagram_check import describe as describe_diagram_checks  # noqa: E402
 
 # 2026-10-09：記号の正本は visual.icons の ICON_NAMES。取り込めなかったときは記号の検査だけ飛ばす
 # （検査の道具の不具合で頁が組めなくならないように）。1行記法の変換器も同じ扱い。
@@ -197,6 +217,7 @@ except Exception:  # noqa: BLE001
     _parse_diagram_text = None
 # 2026-10-09（指摘と添削の作り込み）：原稿の頁の分割・描画は visual/markdown_lite.py。赤ペンの script の
 # 正本は visual/review_scripts.py（まだ無い環境では、役割の正規化だけこの道具の控えを使う）。
+from visual import page_lint  # noqa: E402
 from visual.markdown_lite import count_blocks as _count_blocks  # noqa: E402
 from visual.markdown_lite import normalize_newlines as _normalize_newlines  # noqa: E402
 
@@ -578,18 +599,7 @@ def _manuscript_frame_defaults(spec):
         return spec, []
     components = list(spec.get("components", ()))
     content2 = dict(content)
-    placed = set()
-    sections = content.get("sections")
-    if isinstance(sections, (list, tuple)):
-        for entry in sections:
-            if not isinstance(entry, Mapping):
-                continue
-            name = str(entry.get("component", "")).strip()
-            value = entry.get("content")
-            if value is None:
-                value = content.get(name)
-            if name and value is not None:
-                placed.add(name)
+    placed = _placed_components(content)
     notes = []
     defaults = _manuscript_defaults(manuscript)
     for name in ALL_COMPONENTS:
@@ -614,6 +624,159 @@ def _manuscript_frame_defaults(spec):
         if name not in components:
             components.append(name)
         notes.append("ⓘ 原稿の頁の既定で足した: %s（%s）" % (name, label))
+    spec2 = dict(spec)
+    spec2["content"] = content2
+    spec2["components"] = components
+    return spec2, notes
+
+
+def _placed_components(content):
+    """節の一覧（sections）に中身つきで置かれた部品の名前の集合を返す。
+
+    中身＝節の content か、無ければ content の同じ名前の欄（None でなければ置かれたとみなす）。
+    """
+    placed = set()
+    sections = content.get("sections")
+    if isinstance(sections, (list, tuple)):
+        for entry in sections:
+            if not isinstance(entry, Mapping):
+                continue
+            name = str(entry.get("component", "")).strip()
+            value = entry.get("content")
+            if value is None:
+                value = content.get(name)
+            if name and value is not None:
+                placed.add(name)
+    return placed
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-15（利用者の選択＝案9(a) の A）：原稿でない頁でも、欠けた部品を短い「該当なし」の既定で足す。
+# なぜ＝差し戻しの多い型が「頁を組んだ後に、応答の言葉で要る部品が増える」だった（2026-08-29 に
+#   7部品の頁と9部品の頁が続けて差し戻された）。警告だけでは足されなかったので、道具が足す。
+# ⚠️黙ってやらない（2026-08-29 の利用者の条件）＝足した部品を1つずつ「ⓘ 既定で足した: …」で知らせる。
+#   --no-fill で止められる（従来どおり警告だけ）。
+# ⚠️足さない部品＝overview（書き手の責任・原稿の頁と同じ）と、reasons が名指しで求める部品。
+#   後者を「該当なし」で埋めると、判断を求める頁で選択肢を書き忘れたのが検品を通ってしまう
+#   （中身の無さを隠す）。足さずに強く警告し、書き手に書かせる。
+# ---------------------------------------------------------------------------
+REASON_FOR_COMPONENT = {
+    "decision": "decision_required",
+    "visual": "visual_comparison",
+    "summary": "summary_requested",
+    "progress": "multi_agent_review",
+}
+# 知らせの行の「＝」の後ろ（何を足したかを短く）。
+GENERAL_FILL_WORDS = {
+    "summary": "題だけの全体像",
+    "walkthrough": "該当なし",
+    "examples": "該当なし",
+    "progress": "完了と人待ちなしの2行",
+    "visual": "該当なし",
+    "decision": "進めてよいかの1問と自由記述",
+    "evidence": "既定で足したことの1行",
+    "glossary": "該当なし",
+    "details": "該当なし",
+}
+
+
+def _general_defaults(spec):
+    """原稿でない頁で欠けた部品の既定の中身（短く・「該当なし」が基本）。返るもの＝{部品名: 中身}。
+
+    ⚠️decision は「選ぶ欄の1問＋自由記述」にする（原稿の頁の既定と同じ形）。自由記述の群だけだと
+      表示検査（visual_smoke.py）が最初の群の選ぶ欄（input[name=decision]）を見つけられず落ちる
+      （2026-10-15 実測＝decision-controls-missing）。推奨でない案にも利点を書く（実質1択の警告を出さない）。
+    """
+    title = str(spec.get("title", "") or "").strip() or "この頁"
+    return {
+        "summary": "Goal：%s\nNow：本文の節を参照\nNext：該当なし" % title,
+        "walkthrough": "該当なし：この頁に順を追う説明は無い",
+        "examples": "該当なし：この頁に具体例は無い",
+        "progress": "完了：この頁の作成\n人待ち：なし",
+        "visual": "該当なし：この頁に図は無い",
+        "decision": {"groups": [
+            {"legend": "この頁を読んだあと", "kind": "radio", "options": [
+                {"label": "このまま進めてよい", "recommended": True,
+                 "pros": "この頁に選ぶことは無いので、確かめる往復が増えない",
+                 "cons": "気になる点は、下の自由記述に書かないと伝わらない"},
+                {"label": "気になる点がある（自由記述に書く）",
+                 "pros": "読んで引っかかった所を、次の作業の前に伝えられる",
+                 "cons": "書いた点を直す往復が1回増える"},
+            ]},
+            {"legend": "自由記述", "kind": "free", "placeholder": "気になる点・追加の条件など"},
+        ]},
+        "evidence": "確認済み：この頁の欠けた部品は、組む道具が「該当なし」の既定で足した"
+                    "｜render_page.py の既定の補完",
+        "glossary": "該当なし：新しい用語は無い",
+        "details": "該当なし：補足の詳細は無い",
+    }
+
+
+def _reasons_of(spec):
+    """定義の reasons を文字の集合にする（一覧でも1つの文字でも受ける）。"""
+    raw = spec.get("reasons") if isinstance(spec, Mapping) else None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return set()
+    return {str(item).strip() for item in raw if str(item).strip()}
+
+
+def _frame_defaults(spec):
+    """欠けた部品を短い既定で埋める。返るもの＝(定義の写し, 知らせの行の一覧)。止めない。
+
+    原稿の頁＝_manuscript_frame_defaults（原稿に合わせた既定・従来どおり）。
+    それ以外の頁（2026-10-15）＝_general_defaults の「該当なし」の既定。
+    部品が「節の一覧に中身つきで置かれている」か「content にある」なら中身は足さない
+    （components に載っていなければ載せて1行で知らせる）。
+    ⚠️overview と、reasons が名指しで求める部品は足さず、無ければ強く警告する。
+    ⚠️何も変えないときは同じ定義をそのまま返す（何度かけても同じ結果）。
+    """
+    content = spec.get("content") if isinstance(spec, Mapping) else None
+    if not isinstance(content, Mapping):
+        return spec, []
+    if _manuscript_of(content) is not None:
+        return _manuscript_frame_defaults(spec)
+    components = list(spec.get("components", ()))
+    reasons = _reasons_of(spec)
+    content2 = dict(content)
+    placed = _placed_components(content)
+    defaults = _general_defaults(spec)
+    notes = []
+    changed = False
+    filled = 0
+    for name in ALL_COMPONENTS:
+        label = COMPONENT_LABELS.get(name, name)
+        if name in placed or content2.get(name):
+            if name not in components:
+                components.append(name)
+                changed = True
+                where = "節の一覧" if name in placed else " content の欄"
+                notes.append("ⓘ %s（%s）は%sにあるので components に載せた" % (name, label, where))
+            continue
+        if name == "overview":
+            notes.append(
+                "⚠️overview（%s）が無い＝書き手が書く部品で、この道具は足さない。"
+                "無いと検品で落ちる・差し戻される" % label
+            )
+            continue
+        reason = REASON_FOR_COMPONENT.get(name)
+        if reason and reason in reasons:
+            notes.append(
+                "⚠️%s（%s）が無い＝reasons の %s が求める部品なので、既定（該当なし）では足さない。"
+                "書き手が中身を書く" % (name, label, reason)
+            )
+            continue
+        content2[name] = defaults[name]
+        if name not in components:
+            components.append(name)
+        changed = True
+        filled += 1
+        notes.append("ⓘ 既定で足した: %s（%s）＝%s" % (name, label, GENERAL_FILL_WORDS[name]))
+    if filled:
+        notes.append("ⓘ 既定で足した部品は %d 個（足したくないときは --no-fill を付ける）" % filled)
+    if not changed:
+        return spec, notes
     spec2 = dict(spec)
     spec2["content"] = content2
     spec2["components"] = components
@@ -673,14 +836,19 @@ def apply_review_default(spec):
     return spec2
 
 
-def prepare_spec(spec, project_root=None):
+def prepare_spec(spec, project_root=None, fill=True):
     """定義を組む前の下ごしらえ。返るもの＝(定義の写し, 知らせの行の一覧)。
 
     順＝原稿の読み込み → 欠けた部品の既定 → 赤ペンの役割。原稿が読めなければ ManuscriptError。
     何度かけても同じ結果（build からも呼ぶ）。
+    fill（2026-10-15）＝True なら原稿でない頁の欠けた部品も既定で足す（_frame_defaults）。
+    False（--no-fill）なら従来どおり原稿の頁だけ足す（_manuscript_frame_defaults）。
     """
     spec = resolve_manuscripts(spec, project_root)
-    spec, notes = _manuscript_frame_defaults(spec)
+    if fill:
+        spec, notes = _frame_defaults(spec)
+    else:
+        spec, notes = _manuscript_frame_defaults(spec)
     spec = apply_review_default(spec)
     manuscript = _manuscript_of(spec.get("content"))
     if manuscript is not None:
@@ -722,6 +890,10 @@ def build(spec, project_root=None):
     return full, shaped
 
 
+# 2026-10-31（利用者の思想・案V3）：頁の高さの目安＝1280pxの画面（高さ900px）で何画面までか。
+PAGE_SCREENS_LIMIT = 10
+
+
 def check(path, components, project_root=None):
     """頁を検査する。返るもの＝結果の辞書（合格なら ok=True）。"""
     _, entries = _glossary(project_root)
@@ -738,7 +910,13 @@ def check(path, components, project_root=None):
     low_contrast = max((int(v.get("lowContrast") or 0) for v in viewports.values() if isinstance(v, dict)), default=0)
     min_contrast = min((float(v.get("minContrast")) for v in viewports.values()
                         if isinstance(v, dict) and v.get("minContrast") is not None), default=None)
+    wide = viewports.get("1280x900") if isinstance(viewports.get("1280x900"), dict) else {}
+    page_height = int(wide.get("pageHeight") or 0)
+    # 2026-11-04（A3）：描き終えた箱と矢印の図の点検（警告だけ＝合否に入れない）。
+    diagram_checks = (getattr(smoke, "metrics", None) or {}).get("diagramChecks") or []
     return {
+        "page_height": page_height,
+        "diagram_checks": describe_diagram_checks(diagram_checks if isinstance(diagram_checks, list) else []),
         "low_contrast": low_contrast,
         "min_contrast": min_contrast,
         "path": path,
@@ -2201,10 +2379,10 @@ def preflight_prompt(spec, page_path, text_path=None):
     page_lines.append("機械で済ませた検査（空の強調・図の記号・図番号の重複・問いへの飛び先）は見なくてよい。")
     return NL.join([
         "[試問] この頁は判断を求める（reasons に decision_required）＝人に見せる前に、"
-        "下の文を文脈ゼロのサブエージェント（Claude Code なら general-purpose）にそのまま渡し、"
-        "同期で結果を待つ（background にしない・結果を読まずに応答を終えない）。"
+        "下の文を文脈ゼロのサブエージェント（Claude Code なら general-purpose）にそのまま渡す。"
+        "組んだ直後に裏で始め、撮影・試験・コミットと並列に進め、公開の前に結果を必ず読む（読まずに応答を終えない）。"
         "1〜3 で落ちた問いは絵を足す／問いを落とす／言い換える。4 は文をほどく。"
-        "5 が3語以上なら言い換える。計2巡で打ち切る。"
+        "5 が3語以上なら言い換える。2巡目は、直した後も 2（根拠の無い断定）か 3（実質1択）が残るときだけ（計2巡まで）。"
         "上の合格が False の頁は先に直す。サブエージェントを使えない環境では省き、省いたと応答に1行書く。",
         "---- ここから ----",
         "次の HTML は、人に判断を求める頁です。"
@@ -2257,7 +2435,141 @@ def _parse_argv(argv):
     return positional, runtime, state_path, project_root
 
 
+# 2026-10-31（利用者が選んだ S6）：頁の定義の雛形。`--scaffold report|proposals [--out PATH]` で出す。
+#   中身だけ書けばよい形＝10部品・節・判断欄・根拠の行の型。「…」の所を書き換える。
+SCAFFOLD_KINDS = ("report", "proposals")
+
+
+def scaffold_spec(kind, name="page-name"):
+    """雛形の定義（辞書）を返す。kind＝report（報告と判断）か proposals（案の比べ）。"""
+    if kind not in SCAFFOLD_KINDS:
+        raise ValueError("kind は %s のどれか" % "・".join(SCAFFOLD_KINDS))
+    overview = (
+        "一言でいうと、**（結論の1文）。**（補足の1〜2文）\n"
+        "Goal：（目的）。Now：（今の状態）。Changed：（変えたこと）。"
+        "Risk：（危ない所。[[risk:…]] で強調）。Decision：（選んでほしいこと。無ければ「判断不要」）。"
+    )
+    summary = "Goal：（目的）。\nNow：（今の状態）。\nDecision：（選ぶこと）。"
+    evidence = "\n".join([
+        "確認済み：（確かめた事実）｜（どこで確かめたか＝ファイル:行・コマンドなど）",
+        "実測：（測った数）｜（測り方）",
+        "仮定：（見立て。測っていない）｜私の見立て",
+    ])
+    glossary = "（用語）：（やさしい説明）"
+    if kind == "report":
+        sections = [
+            {"component": "visual", "label": "（結果の節の題）", "asks": [1], "content": [
+                "**（この節の中心の1文）。**（補足）",
+                {"cards": [
+                    {"badge": "済み", "tone": "good", "title": "（項目）", "key": "（中心メッセージ1行）", "text": "（詳細。削らない）"},
+                    {"badge": "未確認", "tone": "warn", "title": "（項目）", "key": "（中心メッセージ1行）", "text": "（詳細）"},
+                ]},
+            ]},
+            {"component": "walkthrough", "label": "前と今", "content": [
+                {"steps": [{"title": "前", "text": "（困っていたこと）"}, {"title": "直し方", "text": "（したこと）"}, {"title": "結果", "text": "（今どうなったか）"}]},
+            ]},
+            {"component": "examples", "label": "例と反例", "content": [
+                {"columns": [{"heading": "例", "text": "（具体例）"}, {"heading": "反例", "text": "（当てはまらない場合）"}]},
+            ]},
+            {"component": "progress", "label": "今の進み具合", "content": [
+                {"table": {"head": ["状態", "項目", "中身"], "rows": [["人待ち", "（項目）", "（中身）"], ["完了", "（項目）", "（中身）"]], "row_head": True}},
+            ]},
+            {"component": "glossary", "label": "この頁の言葉", "content": glossary},
+        ]
+        decision = {"groups": [
+            {"legend": "（問い）", "kind": "radio", "options": [
+                {"label": "（推奨の案）", "recommended": True, "pros": "（利点）", "cons": "（代償）"},
+                {"label": "（別の案）", "pros": "（利点）", "cons": "（代償）"},
+            ]},
+            {"legend": "自由記述", "kind": "free", "placeholder": "（書いてほしいこと）"},
+        ]}
+    else:
+        proposals = [
+            {"no": "A1", "title": "（案の題）", "recommended": True,
+             "claim": "**（案の中心の1文）。**（詳細）", "rating": {"accuracy": 0, "cost": 0},
+             "pros": "（利点）", "cons": "（代償）"},
+            {"no": "A2", "title": "（案の題）", "recommended": False,
+             "claim": "**（案の中心の1文）。**（詳細）", "rating": {"accuracy": 0, "cost": 0},
+             "pros": "（利点）", "cons": "（代償）"},
+        ]
+        sections = [
+            {"component": "walkthrough", "label": "（今の困りごと）", "content": [
+                "**（困りごとの中心の1文）。**（数があれば [[num:…]]）",
+                {"table": {"head": ["何に", "数", "中身"], "rows": [["（項目）", "1", "（中身）"]], "bars": [1], "row_head": True, "caption": "出所：（どこで測ったか）"}},
+            ]},
+            {"component": "visual", "label": "案（A1〜）", "asks": [1], "content": [
+                "**（案の並びの読み方）。**見積もりは精度向上とコスト削減を ＋5〜−5 で。測っていない見立ては、そう書く。",
+                {"proposals": proposals},
+            ]},
+            {"component": "examples", "label": "例と反例", "content": [
+                {"columns": [{"heading": "例", "text": "（具体例）"}, {"heading": "反例", "text": "（当てはまらない場合）"}]},
+            ]},
+            {"component": "progress", "label": "今の進み具合", "content": [
+                {"table": {"head": ["状態", "項目", "中身"], "rows": [["人待ち", "入れる案", "下の判断欄"]], "row_head": True}},
+            ]},
+            {"component": "glossary", "label": "この頁の言葉", "content": glossary},
+        ]
+        decision = {"groups": [
+            {"legend": "入れる案を選んでください（複数可）", "kind": "checkbox",
+             "options": [{"label": "A1 （案の題）"}, {"label": "A2 （案の題）"}]},
+            {"legend": "自由記述", "kind": "free", "placeholder": "（書いてほしいこと）"},
+        ]}
+    nums = ("壱", "弐", "参", "肆", "伍", "陸", "漆", "捌")
+    for index, section in enumerate(sections):
+        section["num"] = nums[index % len(nums)]
+    return {
+        "name": name,
+        "title": "（短い題）",
+        "headline": "（頁の頭の結論の1文）",
+        "components": ["overview", "summary", "walkthrough", "examples", "progress", "visual",
+                       "decision", "evidence", "glossary", "details"],
+        "reasons": ["project_novice_default", "decision_required", "explicit_always"],
+        "publish": "always",
+        "preflight": {"reader": "このプロジェクトの内部を知らない読み手", "allowed": []},
+        "content": {
+            "overview": overview,
+            "summary": summary,
+            "sections": sections,
+            "decision": decision,
+            "evidence": evidence,
+            "provenance": {"source": "（出所）", "owner": "local"},
+        },
+    }
+
+
+def scaffold_main(argv):
+    """`--scaffold KIND [--name NAME] [--out PATH]`。PATH が無ければ標準出力へ。"""
+    kind = argv[0] if argv else ""
+    name, out = "page-name", None
+    rest = list(argv[1:])
+    while rest:
+        token = rest.pop(0)
+        if token == "--name" and rest:
+            name = rest.pop(0)
+        elif token == "--out" and rest:
+            out = rest.pop(0)
+    try:
+        spec = scaffold_spec(kind, name)
+    except ValueError as exc:
+        print("⚠️雛形の種類: %s" % exc)
+        return 2
+    text = json.dumps(spec, ensure_ascii=False, indent=1) + "\n"
+    if out:
+        with open(out, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+        print("雛形を書いた: %s（「（…）」の所を書き換えてから組む）" % out)
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def main(argv):
+    if len(argv) > 1 and argv[1] == "--scaffold":
+        return scaffold_main(argv[2:])
+    # 2026-10-15：--no-fill は _parse_argv の形（4つ組）を変えずにここで取り除く
+    #   （既存の呼び出し・試験が _parse_argv を4つ組で受けている）。
+    fill = "--no-fill" not in argv[1:]
+    argv = argv[:1] + [token for token in argv[1:] if token != "--no-fill"]
     positional, runtime, state_path, project_root_arg = _parse_argv(argv)
     # 2026-09-25：既定は環境変数／上へ辿る探索／従来どおりの順（_default_project_root）。
     # ⚠️このリポジトリで引数なしで走らせた時は、従来どおりの場所に落ち着く（後方互換）。
@@ -2269,20 +2581,36 @@ def main(argv):
     # 2026-10-09（指摘と添削の作り込み）：原稿の節を読み、欠けた部品の既定を足し、赤ペンの役割を決める。
     # 原稿が読めなければ組み立てを止める（唯一の止める理由＝原稿が無いと頁の中身が無い）。
     try:
-        spec, prepare_notes = prepare_spec(spec, project_root)
+        spec, prepare_notes = prepare_spec(spec, project_root, fill=fill)
     except ManuscriptError as exc:
         print("⚠️原稿を読めない＝組み立てを止めた: " + str(exc))
         return 2
     for note in prepare_notes:
         print(note)
+    # 2026-10-19（利用者が選んだ H2・H5）：案のカードから判断欄の選択肢を補い、頁の末尾に仕組みの版を足す。
+    # ⚠️どちらも写しを返す（元の定義は変えない）。この補いの不具合で頁が組めなくならないよう、落ちても続ける。
+    try:
+        linked, link_notes = page_lint.link_proposals(spec["content"])
+        spec = dict(spec)
+        spec["content"] = linked
+        for note in link_notes:
+            print(note)
+    except Exception as exc:  # noqa: BLE001
+        print("ⓘ 案のカードからの補いは走らなかった（%s）" % exc)
+    try:
+        spec["content"] = page_lint.stamp_version(spec["content"], HERE)
+    except Exception as exc:  # noqa: BLE001
+        print("ⓘ 仕組みの版の印字は走らなかった（%s）" % exc)
     # ⚠️頁を作り終えてから応答を書くので、応答の言葉で要求部品が**後から増える**。
     #   7部品で作った頁が、応答に「比較」「決めて」が出ただけで差し戻された実例あり
     #   （2026-08-29）。∴既定は9部品すべて。欠けていたら助言だけ出す（止めはしない）。
     # 節を一覧で書いた場合も、部品の網羅は components で見る（節は見出しの自由化）。
+    # 2026-10-15：既定で足した後に残る部品だけが出る（overview・reasons が求める部品・--no-fill のとき）。
     missing = [name for name in ALL_COMPONENTS if name not in spec["components"]]
     if missing:
         print("⚠️部品が欠けている: " + ",".join(missing)
-              + "  応答の言葉で後から要求されると差し戻される")
+              + "  応答の言葉で後から要求されると差し戻される"
+              + ("" if fill else "（--no-fill を外すと、足せる部品は既定で足す）"))
     # 2026-08-29（ユーザー裁定＝割引採用）：末尾に自動で足す安全網は残すが、**黙ってやらない**。
     # ⚠️「意図せぬ節が末尾に出る」副作用があるので、どれが自動追加かを必ず知らせる。
     listed = {
@@ -2323,12 +2651,25 @@ def main(argv):
         print("   使える記号（全%d個）: %s" % (len(names), ", ".join(names)))
         return 2
     # 2026-10-09：ほかの組む前の検査（図番号の重複・対の無い **・asks の形・asks の案内）＝全部止めない。
-    for check_fn in (duplicate_figure_numbers, unbalanced_emphasis, asks_format_warnings):
+    # 2026-10-19（H3）：試問が見つけていた型を、機械で先に点検する（数の出所・略した単位・絵が一部だけ）。全部止めない。
+    # 2026-10-31（利用者の思想・案V9）：中心メッセージの無い長いカード・強調の無い長い文・長い括弧の補足。全部止めない。
+    for check_fn in (duplicate_figure_numbers, unbalanced_emphasis, asks_format_warnings,
+                     page_lint.number_source_warnings, page_lint.abbreviated_unit_warnings,
+                     page_lint.mixed_thumb_warnings, page_lint.card_key_warnings,
+                     page_lint.plain_text_warnings, page_lint.long_aside_warnings):
         try:
             for warning in check_fn(spec["content"]):
                 print(warning)
         except Exception as exc:  # noqa: BLE001 - 助言の検査なので頁の組み立てを止めない
             print("ⓘ %s は走らなかった（%s）" % (check_fn.__name__, exc))
+    # 2026-11-04（A5・利用者の回答 Q9 A・Q10 A）：箱9・矢印12を超える図を知らせる。止めない。
+    #   道具が作る頁（定義に generator の印がある＝審査結果の頁）には出さない＝作る人が図を分けられない。
+    if not spec.get("generator"):
+        try:
+            for warning in page_lint.diagram_budget_warnings(spec["content"]):
+                print(warning)
+        except Exception as exc:  # noqa: BLE001
+            print("ⓘ diagram_budget_warnings は走らなかった（%s）" % exc)
     try:
         hint = asks_hint(spec["content"], spec.get("reasons", ()))
         if hint:
@@ -2359,8 +2700,15 @@ def main(argv):
     lines.append("")
     bad = 0
     full_check = None
-    for label, path in (("完全版", full), ("器用", shaped)):
-        result = check(path, spec["components"], project_root)
+    # 2026-10-31（利用者が選んだ S2）：完全版と器用の検査（表示検査が各約7秒）を同時に走らせる。
+    #   結果の出し方（順番・文言）は従来どおり。
+    from concurrent.futures import ThreadPoolExecutor
+
+    targets = (("完全版", full), ("器用", shaped))
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        futures = [pool.submit(check, path, spec["components"], project_root) for _label, path in targets]
+        checked = [future.result() for future in futures]
+    for (label, path), result in zip(targets, checked):
         if label == "完全版":
             full_check = result
         lines.append("%s  %d バイト  合格=%s" % (label, result["bytes"], result["ok"]))
@@ -2369,6 +2717,18 @@ def main(argv):
                     "external_dependency"):
             if result[key]:
                 lines.append("   %-22s %s" % (key, str(result[key])[:150]))
+        if label == "完全版" and result.get("page_height"):
+            # 2026-10-31（利用者の思想・案V3＝縦に伸ばさない）：1280pxの画面の何枚分か（表示の高さ900px）。止めはしない。
+            screens = result["page_height"] / 900.0
+            mark = "⚠️" if screens > PAGE_SCREENS_LIMIT else "ⓘ "
+            lines.append("   %s頁の高さ: 1280pxの画面で %d px（約%.1f画面・目安は%d画面まで＝超えたら横に並べる・タブ・畳むを使う）"
+                         % (mark, result["page_height"], screens, PAGE_SCREENS_LIMIT))
+        if label == "完全版" and result.get("diagram_checks"):
+            # 2026-11-04（A3・利用者の回答 Q3 A＝較正が済むまで警告だけ）：描いた後の実寸で見つけた図の崩れ。
+            lines.append("   ⚠️描いた後の図の点検（止めはしない・%d件）＝撮って目で確かめる："
+                         % len(result["diagram_checks"]))
+            for item in result["diagram_checks"][:12]:
+                lines.append("      ・" + item)
         if result.get("low_contrast"):
             lines.append(
                 "   ⚠️薄い字（止めはしない）: 背景とのコントラストが基準（小さな字は4.5）に届かない文字が"
@@ -2386,6 +2746,10 @@ def main(argv):
         rendered = rendered_warnings(built)
     except Exception as exc:  # noqa: BLE001
         rendered = ["ⓘ 組んだ後の検査は走らなかった（%s）" % exc]
+    try:
+        rendered = list(rendered) + page_lint.unexplained_ascii_warnings(built)
+    except Exception as exc:  # noqa: BLE001
+        rendered = list(rendered) + ["ⓘ 英字の語の点検は走らなかった（%s）" % exc]
     if rendered:
         lines.append("")
         lines.extend(rendered)

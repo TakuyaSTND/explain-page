@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .contracts import ExplanationPlan, HookEnvelope
 from .policy import Policy, parse_controls
@@ -57,10 +58,94 @@ SUMMARY_SIGNALS = ("要約", "まとめ", "summary")
 EXPLICIT_PAGE_SIGNALS = ("頁", "ページ", "html", "artifact", "アーティファクト", "図解")
 PROGRESS_SIGNALS = ("subagent", "進捗", "作業中", "人待ち", "複数agent")
 PRIVATE_SIGNALS = ("private", "秘密", "機密", "非公開", "外部公開しない")
+# 2026-10-15（利用者の選択＝案9(b) の A）：**変換だけの依頼**の印（reason conversion_only_request）。
+# 付けるのは、速さの合図と変換の語の**両方**があるときだけ（合図だけ・変換の語だけでは付けない）。
+# ⚠️LaTeX 指定など、速さの合図の無い変換には付けない（丁寧版の作業中は判断の頁が要ることがある）。
+# ⚠️判断・図・要約の合図がある依頼、120字を超える依頼、頁を作る依頼（頁を名指しする語が変換の対象
+#   「<語>を pdf…」の形でなく出る）にも付けない。
+# ⚠️この印は依頼時の計画に残すだけ。差し戻さないかは停止の照合（entrypoint.py の conversion_only_turn）が
+#   応答の長さ・検品証の有無と合わせて決める。
+# 実測（2026-10-15）＝10/10〜14 の利用者の依頼文 65 件に当てて、印が付いたのは5件（どれも PDF への
+#   速い変換の依頼）・付けてはいけない依頼への印は0件（65件を目で確認）。
+SPEED_SIGNALS = ("早く", "はやく", "爆速", "そのまま", "とりあえず", "仮")
+CONVERSION_SIGNALS = (
+    "pdfにして",
+    "pdf化",
+    "pdfに書き出",
+    "docxにして",
+    "wordにして",
+    "ドキュメント化",
+    "印刷して",
+)
+CONVERSION_PROMPT_MAX_CHARS = 120
+# 頁を名指しする語のすぐ後に「を」とこの語が続くなら、その頁は変換の対象（頁を作る依頼ではない）。
+PAGE_OBJECT_TARGETS = ("pdf", "docx", "word", "印刷")
+# 「仮」は熟語の頭（仮説・仮定・仮発表 など）では速さの合図ではない＝次の字が漢字なら数えない。
+_KANJI_FIRST = chr(0x4E00)
+_KANJI_LAST = chr(0x9FFF)
 
 
 def _ordered(values: set[str]) -> tuple[str, ...]:
     return tuple(name for name in COMPONENT_ORDER if name in values)
+
+
+def _compact(text: str) -> str:
+    """全角と半角をそろえ（NFKC）、小文字にして、空白を全部除く（「PDF 化」「ＰＤＦ化」も同じに読む）。"""
+    folded = unicodedata.normalize("NFKC", text or "").lower()
+    return "".join(ch for ch in folded if not ch.isspace())
+
+
+def _speed_hits(compact: str) -> tuple[str, ...]:
+    hits = []
+    for word in SPEED_SIGNALS:
+        if word != "仮":
+            if word in compact:
+                hits.append(word)
+            continue
+        index = compact.find(word)
+        while index >= 0:
+            following = compact[index + 1:index + 2]
+            if not (following and _KANJI_FIRST <= following <= _KANJI_LAST):
+                hits.append(word)
+                break
+            index = compact.find(word, index + 1)
+    return tuple(hits)
+
+
+def _page_words_only_as_object(compact: str) -> bool:
+    """頁を名指しする語が、どれも「<語>を pdf…」（変換の対象）の形でしか出ないなら True。
+
+    ⚠️「頁を作ってPDFにして」「アーティファクト＆PDFにして」は頁を作る依頼＝False（印を付けない）。
+    """
+    for word in EXPLICIT_PAGE_SIGNALS:
+        index = compact.find(word)
+        while index >= 0:
+            rest = compact[index + len(word):]
+            if not (rest.startswith("を") and rest[1:].startswith(PAGE_OBJECT_TARGETS)):
+                return False
+            index = compact.find(word, index + 1)
+    return True
+
+
+def conversion_signals(prompt: str) -> tuple[str, ...]:
+    """変換だけの依頼なら、当たった合図（速さの合図・変換の語）を返す。そうでなければ空。
+
+    条件＝速さの合図と変換の語の両方がある ∧ 判断・図・要約の合図が無い ∧ 120字以内
+         ∧ 頁を名指しする語は変換の対象としてだけ出る。依頼文だけを見る（応答は見ない）。
+    """
+    text = (prompt or "").strip()
+    if not text or len(text) > CONVERSION_PROMPT_MAX_CHARS:
+        return ()
+    compact = _compact(text)
+    speed = _speed_hits(compact)
+    conversion = tuple(word for word in CONVERSION_SIGNALS if word in compact)
+    if not speed or not conversion:
+        return ()
+    if any(word in compact for word in DECISION_SIGNALS + VISUAL_SIGNALS + SUMMARY_SIGNALS):
+        return ()
+    if not _page_words_only_as_object(compact):
+        return ()
+    return speed + conversion
 
 
 def structure_weight(text: str) -> int:
@@ -136,6 +221,10 @@ def compose_plan(envelope: HookEnvelope, policy: Policy) -> ExplanationPlan:
 
     if explicit_page:
         reasons.append("explicit_page_request")
+    # 2026-10-15（案9(b)）：変換だけの依頼の印。依頼文だけを見る（応答が終わった時点では依頼文が空なので、
+    #   この印は依頼時の計画の reason_codes に載せて持ち回す＝explicit_page_request と同じ）。
+    if conversion_signals(envelope.user_message or ""):
+        reasons.append("conversion_only_request")
     components.update(controls.add_components)
     components.difference_update(controls.remove_components)
     depth = controls.depth or policy.default_depth

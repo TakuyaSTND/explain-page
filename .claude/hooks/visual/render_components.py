@@ -70,6 +70,11 @@ except ImportError:
     parse_diagram_text = None  # type: ignore[assignment]
 
 try:
+    from . import figures as _figures
+except ImportError:
+    _figures = None  # type: ignore[assignment]
+
+try:
     from .icons import icon_svg as _render_icon_svg
 except ImportError:
     _render_icon_svg = None  # type: ignore[assignment]
@@ -98,6 +103,13 @@ except ImportError:
 #   （render_components() の先頭で必ずクリアする）。
 _IMAGE_EVIDENCE_LINES: list[str] = []
 _PAGE_HAS_EVIDENCE_SECTION = False
+# 2026-10-31（利用者の指摘「スクショは基本的にホバーに移して」）：頁の hover_images（鍵→画像の指定）と、
+#   本文の [[pic:鍵]] で使った鍵の順。画像は頁の末尾に1枚ずつだけ埋める（同じ画像を何度指しても1回）。
+_HOVER_IMAGES: dict = {}
+_HOVER_USED: list[str] = []
+_HOVER_MAX_WIDTH = 960
+_HOVER_MAX_BYTES = 120_000
+_HOVER_KEY = re.compile(r"[A-Za-z0-9_-]{1,40}")
 
 
 NEWLINE = chr(10)
@@ -275,6 +287,111 @@ document.body.appendChild(overlay);
 });
 });"""
 
+# 2026-10-31（利用者の思想＝認知負荷を下げる二重構造・案V1〜V8）：表示の部品の様式と、それを動かす script。
+# ⚠️この script は全頁共通の2本目＝検品の Gate は VIEW_SCRIPT.strip() との完全一致を求める（artifact_inspection）。
+#   中身を変えたら、試験（表示の部品・検品）を通してから使う。onclick などの属性は使わない（検品が落とす）。
+VIEW_CSS = """
+.wrap{max-width:68rem}.wrap[data-layout="rail"]{max-width:82rem}
+.card-key{margin:0;padding:.35rem .6rem;border-left:3px solid var(--accent);background:var(--accent-soft);color:var(--ink);font-weight:700;font-size:.97rem;line-height:1.65;max-width:none}
+.card[data-tone="good"] .card-key{border-left-color:var(--pass);background:var(--pass-soft)}.card[data-tone="warn"] .card-key{border-left-color:var(--warn);background:var(--warn-soft)}.card[data-tone="bad"] .card-key{border-left-color:var(--fail);background:var(--fail-soft)}
+.card .card-body{font-size:.9rem}
+.em-num{color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums}.em-risk{color:var(--fail);font-weight:700}
+.hv{display:inline-flex;align-items:center;gap:.25rem;padding:0 .3rem;border:1px solid var(--accent);border-radius:2px;background:var(--accent-soft);color:var(--accent);font-weight:700;font-size:.88em;line-height:1.5;cursor:zoom-in;outline:none;white-space:nowrap;vertical-align:.05em}
+.hv::after{content:"";display:inline-block;width:.85em;height:.65em;border:1.5px solid currentColor;border-radius:1px;background:linear-gradient(135deg,transparent 55%,currentColor 55%)}
+.hv:hover,.hv.on{background:var(--accent);color:var(--on-accent)}.hv:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.hv-store{display:none}html:not(.js) .hv-store{display:grid;grid-template-columns:repeat(auto-fit,minmax(16rem,1fr));gap:.8rem}.hv-store-head{grid-column:1/-1;font-weight:700}
+.hv-pop{position:fixed;z-index:60;width:min(36rem,calc(100vw - 1.5rem));padding:.4rem;background:var(--surface);border:1px solid var(--rule);border-radius:3px;box-shadow:0 10px 30px rgba(0,0,0,.28);pointer-events:none}
+.hv-pop .img-figure{gap:.25rem}.hv-pop img{display:block;width:100%;height:auto}
+.ii{position:relative;display:inline-grid;place-items:center;width:1.05rem;height:1.05rem;margin:0 .15rem;border-radius:50%;background:var(--accent);color:var(--on-accent);font:700 .68rem/1 "IBM Plex Mono",ui-monospace,monospace;font-style:italic;cursor:help;vertical-align:.12em;outline:none}
+.ii::after{content:attr(data-info);position:absolute;left:0;top:calc(100% + .35rem);z-index:35;width:min(22rem,calc(100vw - 3rem));padding:.5rem .7rem;border-radius:3px;background:var(--tip-bg);color:var(--tip-ink);font:400 .8rem/1.6 "Zen Kaku Gothic New","Yu Gothic",system-ui,sans-serif;font-style:normal;box-shadow:0 6px 20px rgba(0,0,0,.22);display:none;white-space:normal;text-align:left;pointer-events:none}
+.ii:hover::after,.ii:focus::after,.ii.open::after{display:block}.ii:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media(min-width:601px){.ii[data-flip]::after{left:auto;right:0}}
+@media(max-width:600px){.ii::after{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-height:40vh;overflow:auto}}
+@media(min-width:900px){.card-stack{display:grid;grid-template-columns:repeat(auto-fit,minmax(max(19rem,calc((100% - .8rem)/2)),1fr));align-items:stretch}.card[data-span="full"]{grid-column:1/-1}.col>.card-stack{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:999px){.cols[data-cols]:has(svg.svg-in,svg.dia,svg.tl,svg.quad,svg.venn,svg.flow,svg.score){grid-template-columns:minmax(0,1fr)}}
+.prop-body:not(:has(>.prop-fig,>.prop-fig-missing)){grid-template-columns:minmax(0,1fr)}
+@media(min-width:900px){section .props{display:grid;grid-template-columns:repeat(auto-fit,minmax(max(19rem,calc((100% - 1rem)/2)),1fr))}.props .prop-body{grid-template-columns:minmax(0,1fr)}.props .prop-fig{max-width:24rem}fieldset:has(>label.choice+label.choice){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:.8rem;align-items:stretch}fieldset:has(>label.choice+label.choice)>:not(label.choice){grid-column:1/-1}}
+.view-bar{display:none}
+html.js .view-bar{display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;position:sticky;top:0;z-index:40;margin-top:-1rem;padding:.45rem .6rem;background:var(--ground);border:1px solid var(--rule);border-radius:2px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.wrap[data-layout="rail"]>.view-bar{grid-column:1/-1}
+.view-bar button,.view-bar a{min-height:34px;padding:.25rem .75rem;font:600 .78rem/1.4 "Zen Kaku Gothic New",system-ui,sans-serif;background:var(--surface);color:var(--ink-2);border:1px solid var(--rule);border-radius:999px;text-decoration:none;display:inline-flex;align-items:center;cursor:pointer}
+.view-bar button:hover,.view-bar a:hover{background:var(--accent-soft);color:var(--accent)}
+.view-bar button[aria-pressed="true"]{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.view-bar .vb-hint{margin-left:auto;font:500 .7rem/1.4 "IBM Plex Mono",ui-monospace,monospace;color:var(--ink-3)}
+@media(max-width:600px){.view-bar .vb-hint{display:none}html.js .view-bar{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}.view-bar button,.view-bar a{flex:none;padding:.25rem .6rem}}
+@media(min-width:1000px){.wrap[data-layout="rail"]>.rail{top:4.4rem;max-height:calc(100vh - 6rem)}}
+html[data-view="key"] .card:has(.card-key)>.card-body,html[data-view="key"] section[data-component="evidence"],html[data-view="key"] section[data-component="glossary"],html[data-view="key"] section[data-component="details"],html[data-view="key"] section[data-component="examples"],html[data-view="key"] .prop-notes{display:none}
+html[data-filter="warn"] .card-stack>.card:not([data-tone="warn"]):not([data-tone="bad"]){display:none}
+.tabs{display:flex;flex-direction:column;gap:.8rem;min-width:0}.tab-list{display:none}
+html.js .tab-list{display:flex;flex-wrap:wrap;gap:.3rem;border-bottom:2px solid var(--accent)}
+.tab-list button{min-height:38px;padding:.35rem .95rem;background:var(--surface-2);color:var(--ink-2);border:1px solid var(--rule);border-bottom:0;border-radius:3px 3px 0 0;font-weight:700}
+.tab-list button:hover{background:var(--accent-soft);color:var(--accent)}
+.tab-list button[data-tone="warn"]{border-left:4px solid var(--warn);background:var(--warn-soft);color:var(--ink)}
+.tab-list button[data-tone="bad"]{border-left:4px solid var(--fail);background:var(--fail-soft);color:var(--fail)}
+.tab-list button[data-tone="mild"]{border-left:4px solid var(--warn);background:transparent;color:var(--ink)}
+.tab-list button[data-tone="good"]{border-left:4px solid var(--pass)}
+.tab-list button[data-tone="quiet"]{background:transparent;color:var(--ink-3);font-weight:500}
+.tab-list button[data-tone]:not([aria-selected="true"]):hover{background:var(--accent-soft);color:var(--accent)}
+.tab-list button[data-hint]{position:relative}
+.tab-list button[data-hint]::after{content:attr(data-hint);position:absolute;left:0;top:calc(100% + 4px);z-index:40;width:max-content;max-width:min(24rem,80vw);padding:.5rem .7rem;border-radius:3px;background:var(--tip-bg);color:var(--tip-ink);font:400 .82rem/1.65 "Zen Kaku Gothic New","Yu Gothic",system-ui,sans-serif;text-align:left;white-space:normal;box-shadow:0 6px 20px rgba(0,0,0,.22);display:none;pointer-events:none}
+@media(hover:hover){.tab-list button[data-hint]:hover::after{display:block}}
+.tab-list button[data-hint]:focus-visible::after{display:block}
+.tab-list button[aria-selected="true"]{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.tab-list button[aria-selected="true"][data-tone="warn"],.tab-list button[aria-selected="true"][data-tone="mild"]{border-left-color:var(--warn)}.tab-list button[aria-selected="true"][data-tone="bad"]{border-left-color:var(--fail)}
+.tab-panel{display:flex;flex-direction:column;gap:.9rem;min-width:0}
+html.js .tab-panel:not(.on){display:none}html.js .tab-title{display:none}
+details.fold{background:transparent;border:1px dashed var(--rule);padding:.5rem .8rem}details.fold>summary{font-weight:700;color:var(--accent)}
+[data-ref]{cursor:pointer}.ref-blk{border-radius:3px;padding:.15rem .3rem;margin:0 -.3rem}
+.ref-on:not(g){background:var(--warn-soft);box-shadow:0 0 0 2px var(--warn)}g.ref-on rect{stroke:var(--warn) !important;stroke-width:3 !important}
+.walk{display:flex;flex-direction:column;gap:.45rem;margin:.4rem 0 .2rem}.walk-bar{display:none}
+html.js .walk-bar{display:flex;flex-wrap:wrap;gap:.35rem}
+.walk-bar button{min-height:32px;min-width:2.4rem;padding:.2rem .7rem;border:1px solid var(--rule);border-radius:999px;background:var(--surface);color:var(--ink-2);font:600 .8rem/1.4 "IBM Plex Mono",ui-monospace,monospace;cursor:pointer}
+.walk-bar button[aria-pressed="true"]{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.walk-steps{margin:0;padding-left:1.4rem;display:flex;flex-direction:column;gap:.35rem;font-size:.9rem;color:var(--ink-2)}.walk-steps b{color:var(--ink)}
+@media(min-width:900px){.tabs[data-layout="side"]>.tab-list button[data-hint]::after{left:calc(100% + 8px);top:0}.tabs[data-layout="side"]{display:grid;grid-template-columns:minmax(11rem,17rem) minmax(0,1fr);column-gap:1rem;align-items:start}
+html.js .tabs[data-layout="side"]>.tab-list{flex-direction:column;flex-wrap:nowrap;border-bottom:0;border-right:2px solid var(--accent);grid-column:1;grid-row:1}
+.tabs[data-layout="side"]>.tab-list button{border-radius:3px 0 0 3px;border-bottom:1px solid var(--rule);border-right:0;text-align:left}
+.tabs[data-layout="side"] blockquote{font-size:.95rem;color:var(--ink);border-left-color:var(--accent)}
+html.js .tabs[data-layout="side"]>.tab-panel{grid-column:2;grid-row:1;position:sticky;top:3.8rem;padding:.8rem 1rem;border:1px solid var(--rule);border-left:3px solid var(--accent);border-radius:2px;background:var(--surface)}}
+@media print{.hv-store{display:grid !important;grid-template-columns:1fr 1fr;gap:.6rem}.hv-pop{display:none !important}.view-bar,.tab-list{display:none !important}.walk-bar{display:none !important}.walk-step{display:list-item !important}.tab-panel{display:flex !important}.tab-title{display:block !important}details::details-content{content-visibility:visible;display:block}.ii{font-size:0;width:auto;height:auto;background:none;margin:0}.ii::after{display:inline !important;position:static;width:auto;padding:0;background:none;color:var(--ink-2);box-shadow:none;font-size:.8rem;content:"（" attr(data-info) "）"}}
+"""
+VIEW_SCRIPT = r"""(()=>{const d=document,h=d.documentElement;h.classList.add('js');
+const ls={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+const $=id=>d.getElementById(id);
+const setView=m=>{h.dataset.view=m;const b=$('vb-mode');if(b){b.setAttribute('aria-pressed',String(m==='key'));b.textContent=m==='key'?'全部を表示':'要点だけ'}};
+setView(ls.get('vb-view')==='key'?'key':'all');
+$('vb-mode')&&$('vb-mode').addEventListener('click',()=>{const m=h.dataset.view==='key'?'all':'key';setView(m);ls.set('vb-view',m)});
+$('vb-open')&&$('vb-open').addEventListener('click',()=>d.querySelectorAll('details').forEach(x=>{x.open=true}));
+$('vb-close')&&$('vb-close').addEventListener('click',()=>d.querySelectorAll('details').forEach(x=>{x.open=false}));
+$('vb-warn')&&$('vb-warn').addEventListener('click',e=>{const on=h.dataset.filter!=='warn';if(on)h.dataset.filter='warn';else delete h.dataset.filter;e.currentTarget.setAttribute('aria-pressed',String(on))});
+d.querySelectorAll('[data-tabs]').forEach((box,bi)=>{const tabs=[...box.querySelectorAll(':scope>.tab-list>[role=tab]')],panels=[...box.querySelectorAll(':scope>.tab-panel')];if(!tabs.length)return;const key='vb-tab-'+bi;
+const show=i=>{tabs.forEach((t,j)=>{t.setAttribute('aria-selected',String(i===j));t.tabIndex=i===j?0:-1});panels.forEach((p,j)=>p.classList.toggle('on',i===j));ls.set(key,String(i))};
+let start=Number(ls.get(key)||0);if(!(start>=0&&start<tabs.length))start=0;show(start);
+tabs.forEach((t,i)=>{t.addEventListener('click',()=>show(i));t.addEventListener('keydown',e=>{const fw=e.key==='ArrowRight'||e.key==='ArrowDown',bw=e.key==='ArrowLeft'||e.key==='ArrowUp';if(!fw&&!bw)return;e.preventDefault();const n=(i+(fw?1:-1)+tabs.length)%tabs.length;tabs[n].focus();show(n)})})});
+const refOn=r=>{d.querySelectorAll('.ref-on').forEach(x=>x.classList.remove('ref-on'));if(r)d.querySelectorAll('[data-ref="'+r+'"]').forEach(x=>x.classList.add('ref-on'))};
+d.addEventListener('click',e=>{const t=e.target&&e.target.closest?e.target.closest('[data-ref]'):null;if(!t||(e.target.closest&&e.target.closest('a,button,input,label,.ii')))return;const r=t.getAttribute('data-ref');if(t.classList.contains('ref-on')){refOn(null);return}refOn(r);const inSvg=!!t.closest('svg');const other=[...d.querySelectorAll('[data-ref="'+r+'"]')].find(x=>x!==t&&!!x.closest('svg')!==inSvg&&x.offsetParent!==null);if(other){const b=other.getBoundingClientRect();if(b.top<0||b.bottom>innerHeight)other.scrollIntoView({block:'center'})}});
+d.querySelectorAll('[data-walk]').forEach(w=>{const steps=[...w.querySelectorAll('.walk-step')],btns=[...w.querySelectorAll('.walk-bar button')],all=btns.length-1;
+const go=i=>{btns.forEach((b,k)=>b.setAttribute('aria-pressed',String(k===i)));steps.forEach((s,k)=>{s.hidden=!(i===all||k===i)});refOn(i===all?null:steps[i]&&steps[i].getAttribute('data-ref'))};
+btns.forEach((b,i)=>b.addEventListener('click',()=>go(i)))});
+d.querySelectorAll('.ii').forEach(el=>{const r=el.getBoundingClientRect();if(r.right>innerWidth*0.6)el.setAttribute('data-flip','')});
+const hvStore=d.querySelector('.hv-store');if(hvStore){let pop=null,cur=null;const itemOf=el=>hvStore.querySelector('[data-hv-img="'+el.dataset.hv+'"]');
+const hide=()=>{if(pop){pop.remove();pop=null}if(cur){cur.classList.remove('on');cur=null}};
+const show=el=>{hide();const it=itemOf(el);if(!it)return;pop=d.createElement('div');pop.className='hv-pop';pop.appendChild(it.firstElementChild.cloneNode(true));d.body.appendChild(pop);cur=el;el.classList.add('on');const r=el.getBoundingClientRect(),pw=pop.offsetWidth,ph=pop.offsetHeight;let x=Math.min(Math.max(8,r.left),innerWidth-pw-8),y=r.bottom+8;if(y+ph>innerHeight-8)y=Math.max(8,r.top-ph-8);pop.style.left=x+'px';pop.style.top=y+'px'};
+d.querySelectorAll('.hv[data-hv]').forEach(el=>{el.addEventListener('mouseenter',()=>show(el));el.addEventListener('mouseleave',hide);el.addEventListener('focus',()=>show(el));el.addEventListener('blur',hide);
+const zoom=()=>{hide();const it=itemOf(el),f=it&&it.querySelector('[data-zoom]');if(f)f.click()};el.addEventListener('click',e=>{e.preventDefault();e.stopPropagation();zoom()});el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();zoom()}})});
+addEventListener('scroll',hide,{passive:true})}
+d.addEventListener('click',e=>{const t=e.target&&e.target.closest?e.target.closest('.ii'):null;d.querySelectorAll('.ii.open').forEach(x=>{if(x!==t)x.classList.remove('open')});if(t)t.classList.toggle('open')});
+d.addEventListener('keydown',e=>{if(e.key==='Escape'){d.querySelectorAll('.ii.open').forEach(x=>x.classList.remove('open'));return}
+const tg=e.target||{};if(/^(INPUT|TEXTAREA|SELECT)$/.test(tg.tagName||'')||tg.isContentEditable||e.ctrlKey||e.metaKey||e.altKey)return;
+if(e.key!=='j'&&e.key!=='k')return;const secs=[...d.querySelectorAll('section[id]')].filter(s=>s.offsetParent!==null);if(!secs.length)return;
+const tops=secs.map(s=>s.getBoundingClientRect().top);let target=null;
+if(e.key==='j'){target=secs.find((s,i)=>tops[i]>8)}else{for(let i=secs.length-1;i>=0;i--){if(tops[i]<-8){target=secs[i];break}}}
+if(target){e.preventDefault();target.scrollIntoView({block:'start'})}});
+let before=null;window.addEventListener('beforeprint',()=>{before=h.dataset.view;setView('all');d.querySelectorAll('details').forEach(x=>{if(!x.open){x.open=true;x.dataset.printOpened='1'}})});
+window.addEventListener('afterprint',()=>{if(before)setView(before);d.querySelectorAll('details[data-print-opened]').forEach(x=>{x.open=false;delete x.dataset.printOpened})});
+})();"""
+
+
 
 # 2026-10-09：使う頁にだけ足す CSS（足さない頁のバイトを増やさない）。
 # 取り下げた選択肢：破線の枠・薄く・案の文は取り消し線・絵は白黒。明暗どちらでも読めるよう色はトークンだけ。
@@ -293,6 +410,34 @@ DIA_Q_CSS = (
     ".dia-q{cursor:pointer;outline:none}"
     ".dia-q:hover .dia-q-dot,.dia-q:focus-visible .dia-q-dot{fill:var(--fail-soft)}"
     ".dia-q:focus-visible .dia-q-dot{stroke-width:2.5}"
+)
+# 案の一覧（proposals）の様式。使う頁にだけ足す。色はトークンだけ（明暗どちらでも読める）。
+PROPOSALS_CSS = (
+    ".props{display:flex;flex-direction:column;gap:1rem;min-width:0}"
+    ".prop{border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;"
+    "background:var(--surface);padding:.8rem 1rem;min-width:0}"
+    ".prop[data-recommended=\"1\"]{border-top-color:var(--pass)}"
+    ".prop-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem}"
+    ".prop-no{font:600 .75rem/1.6 \"IBM Plex Mono\",ui-monospace,monospace;color:var(--accent)}"
+    ".prop-title{margin:0;font-size:1.02rem;line-height:1.5}"
+    ".prop-rate{margin:.15rem 0 .55rem;font:500 .78rem/1.6 \"IBM Plex Mono\",ui-monospace,monospace;color:var(--ink-3)}"
+    ".prop-body{display:grid;grid-template-columns:minmax(0,24rem) minmax(0,1fr);gap:1rem;align-items:start}"
+    ".prop-fig{margin:0;min-width:0}"
+    ".prop-fig svg{display:block;width:100%;height:auto;max-width:26rem}"
+    ".prop-fig figcaption{font-size:.78rem;color:var(--ink-3)}"
+    ".prop-fig-missing{margin:0;font-size:.82rem;color:var(--warn)}"
+    ".prop-text{min-width:0;display:flex;flex-direction:column;gap:.45rem}"
+    ".prop-text p{margin:0}"
+    ".prop-pc{font-size:.88rem;color:var(--ink-2)}"
+    ".prop-pc b{font:600 .7rem/1.6 \"IBM Plex Mono\",ui-monospace,monospace;letter-spacing:.04em;margin-right:.3rem}"
+    "@media(max-width:700px){.prop-body{grid-template-columns:minmax(0,1fr)}}"
+    # 2026-10-19：カードの「これを選ぶ」枠（判断欄の同じ選択肢の入力を指す label）。押した後の見た目は _pick_css。
+    ".prop-pick{margin-left:auto;display:inline-flex;align-items:center;flex-wrap:wrap;gap:.1rem .5rem;"
+    "min-height:36px;padding:.3rem .8rem;border:1px solid var(--accent);border-radius:2px;"
+    "background:var(--surface);color:var(--accent);font-size:.82rem;font-weight:600;line-height:1.5;cursor:pointer}"
+    ".prop-pick:hover{background:var(--accent-soft)}"
+    ".prop-pick small{font-size:.72rem;font-weight:400;color:var(--ink-3)}"
+    ".prop-pick .pk-on{display:none}"
 )
 # 原稿の節（`.ms`）の最小の様式。原稿は頁の見出しの大きさに引きずられないよう、見出しを控えめにする。
 MANUSCRIPT_CSS = (
@@ -334,14 +479,16 @@ def _tone(label: str) -> str:
     return "neutral"
 
 
-def _find_term(text: str, term: str, start: int) -> int:
+def _find_term(text: str, term: str, start: int, cues: Sequence[str] | None = None) -> int:
     # 2026-09-29：語の境目の規則は検品器と共通（term_boundary.py）。部分一致だったので
     #   「目盛り」の中の「盛り」やファイル名の中の feedback に説明が付いていた。
-    return find_term(text, term, start)
+    # 2026-10-18：用語集の規則表（glossary-context.json）の手がかりの語も、検品器と同じ関数に渡す。
+    #   None＝規則なし／()＝自動では包まない／非空＝手がかりが前後20字にあるときだけ。
+    return find_term(text, term, start, cues)
 
 
-def _count_term(text: str, term: str) -> int:
-    """語が本文に何回現れるかを数える（境界の判定は `_find_term` と同じ）。
+def _count_term(text: str, term: str, cues: Sequence[str] | None = None) -> int:
+    """語が本文に何回現れるかを数える（境界と規則の判定は `_find_term` と同じ）。
 
     側柱の用語リスト（③）が「2回以上現れた語だけ」を選ぶために使う。
     """
@@ -350,7 +497,7 @@ def _count_term(text: str, term: str) -> int:
     count = 0
     position = 0
     while True:
-        found = _find_term(text, term, position)
+        found = _find_term(text, term, position, cues)
         if found < 0:
             return count
         count += 1
@@ -419,7 +566,7 @@ def _escape_with_tooltips(
         for key, display, entry in candidates:
             if key in seen:
                 continue
-            found = _find_term(text, display, position)
+            found = _find_term(text, display, position, entry.cues)
             if found >= 0:
                 matches.append((found, -len(display), key, display, entry))
         if not matches:
@@ -506,6 +653,35 @@ def _render_inline(
                     output.append(
                         '<span class="pin" data-tone="%s">%s</span>'
                         % (_badge_tone(pin_tone or "acc"), escape(number.strip()))
+                    )
+                elif tone.strip().lower() == "num":
+                    # 2026-10-31（利用者の思想・案V2＝強調の役割の固定）：数は色＋太字。
+                    output.append('<b class="em-num">%s</b>' % escape(label.strip()))
+                elif tone.strip().lower() == "risk":
+                    # 案V2：リスク・否定は赤の太字。
+                    output.append('<b class="em-risk">%s</b>' % escape(label.strip()))
+                elif tone.strip().lower() == "pic":
+                    # 2026-10-31：[[pic:鍵]] / [[pic:鍵:表示の語]]＝hover_images に登録した画像を、語にマウスを載せる・
+                    #   キーで止まると浮かせて出す（押すと拡大）。登録の無い鍵は語だけ出す（壊れた印を出さない）。
+                    key, _, shown = label.partition(":")
+                    key = key.strip()
+                    shown = shown.strip() or key
+                    if _HOVER_KEY.fullmatch(key) and key in _HOVER_IMAGES:
+                        if key not in _HOVER_USED:
+                            _HOVER_USED.append(key)
+                        output.append(
+                            '<span class="hv" tabindex="0" role="button" data-hv="%s" aria-label="%s（資料の画像を出す）">%s</span>'
+                            % (escape(key, quote=True), escape(shown, quote=True), escape(shown))
+                        )
+                    else:
+                        output.append(escape(shown))
+                elif tone.strip().lower() == "info":
+                    # 案V5：本質でない補足（出所・測定の条件など）を ⓘ にしまう。マウスを重ねる・押す・
+                    # キーで止まると出る。印刷では括弧の中の文として出る（VIEW_CSS の print）。
+                    note = label.strip()
+                    output.append(
+                        '<span class="ii" tabindex="0" role="note" aria-label="補足：%s" data-info="%s">i</span>'
+                        % (escape(note, quote=True), escape(note, quote=True))
                     )
                 else:
                     output.append(
@@ -1072,9 +1248,18 @@ def _diagram_route_path(route: object) -> str:
 
 
 def _diagram_box_glossary_match(
-    box: object, glossary_entries: Mapping[str, GlossaryEntry], seen_terms: set[str]
+    box: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+    consume: bool = True,
 ) -> tuple[str, str] | None:
-    """⑦箱の題・本文に用語集の語があれば `(表示, 説明)` を返す（無ければ None）。"""
+    """⑦箱の題・本文に用語集の語があれば `(表示, 説明)` を返す（無ければ None）。
+
+    consume：True のとき、見つけた語を seen_terms に入れる（本文の初出の吹き出しを譲る）。
+    2026-10-30：箱に自前の吹き出し（hover）が付く図では、用語の説明は使われない（箱の吹き出しが優先）。
+    それなのに語だけを「見た」ことにしていたので、箱の題を長くした頁（目的手段マップの箱を72字にした）で、
+    本文の初出が包まれず、検品の「未包装」で落ちた。hover のある箱は consume=False で呼ぶ。
+    """
     combined = NEWLINE.join([*box.title_lines, *box.body_lines, *box.note_lines])
     if not combined:
         return None
@@ -1082,8 +1267,9 @@ def _diagram_box_glossary_match(
         display = key.strip("`").strip()
         if not display:
             continue
-        if _find_term(combined, display, 0) >= 0:
-            seen_terms.add(key)
+        if _find_term(combined, display, 0, entry.cues) >= 0:
+            if consume:
+                seen_terms.add(key)
             return display, _display_description(entry)
     return None
 
@@ -1231,9 +1417,9 @@ def _diagram_block_layout(
             else:
                 icon_warnings.append("diagram: 不明な記号 %r は無視した" % box.icon)
 
-        match = _diagram_box_glossary_match(box, glossary_entries, seen_terms)
         raw_node = raw_nodes[box.node_index] if 0 <= box.node_index < len(raw_nodes) else None
         hover = _diagram_node_hover(raw_node, " ".join(box.title_lines).strip())
+        match = _diagram_box_glossary_match(box, glossary_entries, seen_terms, consume=not hover)
         group_attrs = ""
         if hover:
             group_attrs, title_tag = _diagram_hover_attributes(hover)
@@ -1242,6 +1428,10 @@ def _diagram_block_layout(
             title_tag = (
                 "<title>%s：%s</title>" % (escape(match[0]), escape(match[1])) if match else ""
             )
+        # 2026-10-31（利用者が選んだ M1）：箱の `ref` と同じ印の本文の塊をつなぐ（押すと両方が光る）。
+        box_ref = _safe_ref(raw_node.get("ref")) if isinstance(raw_node, Mapping) else ""
+        if box_ref:
+            group_attrs += ' data-ref="%s"' % box_ref
         underline = (
             '<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="var(%s)" '
             'stroke-width="1" stroke-dasharray="2 3"></line>'
@@ -1309,7 +1499,9 @@ def _diagram_block_layout(
     route_paths_svg: list[str] = []
     route_labels_svg: list[str] = []
     used_strokes: dict[str, None] = {}
-    for route, tone in zip(layout.routes, edge_tones):
+    # 2026-11-04（A3）：経路とそのラベルに同じ番号（data-r）を付ける＝描いた後の点検（visual/diagram_check.py）が
+    #   「ラベルに自分以外の線が通るか」を見分けるため。番号は道具が振る整数だけ（利用者の文字は入らない）。
+    for route_no, (route, tone) in enumerate(zip(layout.routes, edge_tones)):
         stroke = DIAGRAM_TONES.get(tone, "--accent")
         used_strokes[stroke] = None
         stroke_key = stroke.lstrip("-")
@@ -1323,8 +1515,8 @@ def _diagram_block_layout(
             "" if route.kind == "line" else ' marker-end="url(#dia-arrow-%s)"' % stroke_key
         )
         route_paths_svg.append(
-            '<path d="%s" fill="none" stroke="var(%s)" stroke-width="1.6"%s%s%s></path>'
-            % (_diagram_route_path(route), stroke, dash, marker_start, marker_end)
+            '<path d="%s" fill="none" stroke="var(%s)" stroke-width="1.6"%s%s%s data-r="%d"></path>'
+            % (_diagram_route_path(route), stroke, dash, marker_start, marker_end, route_no)
         )
         if route.label:
             # ⚠️背景の矩形は付けない＝2026-08-29版の矢印ラベルと同じ「文字だけ」に揃える
@@ -1332,10 +1524,10 @@ def _diagram_block_layout(
             route_labels_svg.append(
                 '<text x="%.1f" y="%.1f" fill="var(--ink-2)" font-size="12" '
                 'paint-order="stroke" stroke="var(--ground)" stroke-width="5" stroke-linejoin="round" '
-                'text-anchor="middle">%s</text>'
+                'text-anchor="middle" data-r="%d">%s</text>'
                 # layout_diagram の label_y は文字の中心。SVG text の y は基線なので、
                 # 12px文字の見かけの中心が label_y 付近になるよう6px下へ置く。
-                % (route.label_x, route.label_y + 6, escape(route.label))
+                % (route.label_x, route.label_y + 6, route_no, escape(route.label))
             )
 
     described = _stringify(value.get("title") or value.get("caption") or "図")
@@ -1393,14 +1585,11 @@ def _diagram_block_layout(
         if all_warnings
         else ""
     )
-    hover_hint = (
-        '<p class="dia-hover-hint"><span aria-hidden="true">ⓘ</span>'
-        "箱にマウスを重ねる、Tabキーで選ぶ、またはタップすると詳しい説明を表示します。"
-        "</p>"
-        if hover_count
-        else ""
-    )
-    return hover_hint + '<div class="dia-wrap">' + svg + "</div>" + caption_html + warn_html
+    # 2026-10-31（利用者の指摘「余計な説明要らない・邪魔」）：図の上の案内の1行（ⓘ 箱にマウスを重ねる…）は出さない。
+    #   箱は触れば分かる（マウスの形が変わる・キーで止まる・押すと出る）。説明の中身は箱の aria-label にもある。
+    hover_hint = ""
+    walk_html = _walk_html(value.get("walk"), glossary_entries, seen_terms)
+    return hover_hint + '<div class="dia-wrap">' + svg + "</div>" + walk_html + caption_html + warn_html
 
 
 # ---------------------------------------------------------------------------
@@ -1977,6 +2166,13 @@ def _one_table(
         ]
         if numeric_values:
             col_stats[col] = (min(numeric_values), max(numeric_values))
+    # 2026-10-31（利用者の指摘・インパクト表）：同じ列で「1.6%」だけ右寄せ・等幅、「資料に無い」「50ドル/件」は左寄せ、と混ざっていた。
+    #   数として右寄せにするのは、空欄を除いた中身が全部数の列だけにする。
+    numeric_cols = set()
+    for col in range(width):
+        firsts = [row[col].partition(NEWLINE)[0] for row in body if col < len(row) and row[col].strip()]
+        if firsts and all(_is_numeric(cell) for cell in firsts):
+            numeric_cols.add(col)
     rows_html = []
     used_stack = False
     for row_index, row in enumerate(body):
@@ -2023,7 +2219,7 @@ def _one_table(
                 classes.append("num")
             else:
                 main_html = _render_inline(first, glossary_entries, seen_terms)
-                if _is_numeric(first):
+                if index in numeric_cols and _is_numeric(first):
                     classes.append("num")
             style_attr = ' style="%s"' % ";".join(style_bits) if style_bits else ""
             # 2026-10-01（P6）：行見出し＝1列目を th（scope=row）にして太くする。
@@ -2466,9 +2662,19 @@ def _cards_block(
                 + right_html
                 + "</h3>"
             )
+        # 2026-10-31（利用者の思想・案V1＝1カード1メッセージ）：中心メッセージ（key）を色の帯と太字で
+        # 1行目立たせ、その下に本文（詳細・削らない）を置く。「要点だけ」の表示では本文を畳む（VIEW_CSS）。
+        key = _stringify(item.get("key", "")).strip()
+        key_html = (
+            '<p class="card-key">' + _inline_with_breaks(key, glossary_entries, seen_terms) + "</p>"
+            if key
+            else ""
+        )
         body = item.get("text", "")
         body_html = (
-            "<p>" + _inline_with_breaks(body, glossary_entries, seen_terms) + "</p>" if body else ""
+            '<p class="card-body">' + _inline_with_breaks(body, glossary_entries, seen_terms) + "</p>"
+            if body
+            else ""
         )
         extra = ""
         if item.get("items"):
@@ -2484,9 +2690,11 @@ def _cards_block(
                 '<input type="text" class="obj-why" data-label="%s" '
                 'aria-label="%s の理由" placeholder="理由（任意）"></div>' % (label, label, label)
             )
+        # 案V3：広い画面ではカードを横に並べる（VIEW_CSS）。span が full のカードは横幅いっぱい。
+        span = ' data-span="full"' if _stringify(item.get("span", "")).strip() in ("full", "wide") else ""
         cards.append(
-            '<div class="card"%s>%s%s%s</div>'
-            % (' data-tone="%s"' % escape(tone, quote=True) if tone else "", head, body_html, extra)
+            '<div class="card"%s%s>%s%s%s%s</div>'
+            % (' data-tone="%s"' % escape(tone, quote=True) if tone else "", span, head, key_html, body_html, extra)
         )
     return '<div class="card-stack">' + "".join(cards) + "</div>"
 
@@ -2962,6 +3170,42 @@ def _add_zoom_attribute(figure_html: str) -> str:
     return figure_html[:insert_at] + ' data-zoom="1"' + figure_html[insert_at:]
 
 
+def _hover_store_html() -> str:
+    """[[pic:鍵]] で使った画像を、頁の末尾に1枚ずつ埋める（2026-10-31）。
+
+    画面では隠し、表示の script が語のそばに浮かせて出す。押すと拡大（data-zoom と同じ重ね表示）。
+    JS が無い・印刷では、この置き場を「この頁で使った資料の画像」として並べる＝画像は消えない。
+    実測の1行（ハッシュと出所）は、image と同じく根拠欄へ積む。
+    """
+    if not _HOVER_USED or embed_image is None:
+        return ""
+    items = []
+    for key in _HOVER_USED:
+        spec = _HOVER_IMAGES.get(key)
+        if isinstance(spec, str):
+            spec = {"path": spec}
+        if not isinstance(spec, Mapping):
+            continue
+        try:
+            result = embed_image(spec, max_width=_HOVER_MAX_WIDTH, max_bytes=_HOVER_MAX_BYTES)
+        except Exception:  # 契約は例外を投げない実装だが、ここでも一段守る。
+            continue
+        if not result.html:
+            continue
+        if result.source_line:
+            _IMAGE_EVIDENCE_LINES.append(result.source_line)
+        items.append(
+            '<div class="hv-item" data-hv-img="%s">%s</div>' % (escape(key, quote=True), _add_zoom_attribute(result.html))
+        )
+    if not items:
+        return ""
+    return (
+        '<div class="hv-store" aria-label="この頁で使った資料の画像"><p class="hv-store-head">この頁で使った資料の画像</p>'
+        + "".join(items)
+        + "</div>"
+    )
+
+
 def _image_block(
     value: object,
     glossary_entries: Mapping[str, GlossaryEntry],
@@ -3170,6 +3414,187 @@ def _diagram_text_block(
     return html
 
 
+def _warn_list_html(warnings: Sequence[str]) -> str:
+    if not warnings:
+        return ""
+    return '<ul class="dia-warn">' + "".join("<li>" + escape(_stringify(w)) + "</li>" for w in warnings) + "</ul>"
+
+
+def _mermaid_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """2026-11-04（A6・利用者の回答 Q11 B・Q12 A）：鍵 mermaid の文字から図を組む。
+
+    入れるもの＝Mermaid の文字、または {"text", "num", "caption", "source"}。流れ図（flowchart・graph）と状態の図
+    （stateDiagram）は、箱と矢印の図（diagram）に変えて配置の計算に任せる（HTML と PDF が同じ配置）。やりとりの図
+    （sequenceDiagram）は visual/figures.py が形を計算する。読めない書き方は捨てて、図の下に注意書きで出す（黙らない）。
+    """
+    spec = value if isinstance(value, Mapping) else {"text": _stringify(value)}
+    text = _stringify(spec.get("text", ""))
+    if not text.strip():
+        return ""
+    if _figures is None:
+        return _log_block(text, glossary_entries, seen_terms)
+    parsed = _figures.parse_mermaid(text)
+    extra = {key: spec[key] for key in ("num", "caption", "source") if key in spec}
+    if parsed["kind"] in ("flowchart", "state"):
+        diagram = dict(_figures.mermaid_to_diagram(parsed), **extra)
+        return _diagram_block(diagram, glossary_entries, seen_terms) + _warn_list_html(parsed["warnings"])
+    if parsed["kind"] == "sequence":
+        geom = _figures.sequence_shapes(parsed)
+        title = _stringify(spec.get("caption") or "やりとりの図")
+        html = _figure_svg_block(lambda _spec: _figures.shapes_svg(geom, title, "fig-shapes seq"), extra, glossary_entries, seen_terms)
+        return html + _warn_list_html(list(parsed["warnings"]) + list(geom.get("warnings") or []))
+    return _log_block(text, glossary_entries, seen_terms) + _warn_list_html(parsed["warnings"])
+
+
+_SHAPE_TITLES = {"fishbone": "魚の骨の図（原因の分類）", "waterfall": "滝の図（足し引きの内訳）", "dumbbell": "ダンベルの図（いま→施策後）"}
+
+
+def _shapes_block(
+    key: str,
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """2026-11-04（A4・利用者の回答 Q13 A）：魚の骨・滝の図・ダンベル。形は visual/figures.py（PDF と同じ計算）。"""
+    if _figures is None or not isinstance(value, Mapping):
+        return ""
+    compute = {"fishbone": _figures.fishbone_shapes, "waterfall": _figures.waterfall_shapes, "dumbbell": _figures.dumbbell_shapes}[key]
+    geom = compute(value)
+    title = _stringify(value.get("title") or value.get("caption") or _SHAPE_TITLES[key])
+    html = _figure_svg_block(lambda _spec: _figures.shapes_svg(geom, title, "fig-shapes " + key), value, glossary_entries, seen_terms)
+    return html + _warn_list_html(geom.get("warnings") or [])
+
+
+def _signed_number(value: object) -> str:
+    """+3・−1・0 の形（符号つき）。数でなければ文字のまま。"""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _stringify(value)
+    if number == 0:
+        return "0"
+    text = ("%+g" % number).replace("-", "\u2212")
+    return text
+
+
+def _proposal_rating_text(value: object) -> str:
+    if isinstance(value, Mapping):
+        parts = []
+        if "accuracy" in value:
+            parts.append("精度向上 " + _signed_number(value["accuracy"]))
+        if "cost" in value:
+            parts.append("コスト削減 " + _signed_number(value["cost"]))
+        return "／".join(parts)
+    return _stringify(value)
+
+
+def _proposal_figure(value: object) -> str:
+    """案の図。kind の文字列・{"kind"|"svg","caption"}・SVG の文字列を受け、許可リストで組み直して返す。"""
+    if not value:
+        return ""
+    raw, caption = "", ""
+    if isinstance(value, Mapping):
+        caption = _stringify(value.get("caption", ""))
+        if value.get("svg"):
+            raw = _stringify(value["svg"])
+        elif value.get("kind"):
+            raw = _exhibit_svg_for(_stringify(value["kind"]))
+    else:
+        text = _stringify(value).strip()
+        raw = text if text.startswith("<svg") else _exhibit_svg_for(text)
+    if not raw.strip():
+        return '<p class="prop-fig-missing">図の種類が分からず、図を出せなかった。</p>'
+    if sanitize_svg is None:
+        return '<p class="prop-fig-missing">SVGの取り込みは今使えない。</p>'
+    result = sanitize_svg(_ensure_xlink_namespace(raw))
+    if not result.svg:
+        return '<p class="prop-fig-missing">図を取り込めなかった。</p>'
+    cap = "<figcaption>" + escape(caption) + "</figcaption>" if caption else ""
+    return '<figure class="prop-fig">' + result.svg + cap + "</figure>"
+
+
+def _exhibit_svg_for(kind: str) -> str:
+    try:
+        from .exhibits import exhibit_svg
+    except ImportError:
+        return ""
+    try:
+        return exhibit_svg(kind)
+    except ValueError:
+        return ""
+
+
+def _safe_pick_id(value: object) -> str:
+    """案のカードの枠と判断欄の入力を結ぶ id。英数字・「-」「_」だけを通し、他は空にする（CSS の選び方にも使うため）。"""
+    text = _stringify(value).strip() if value not in (None, False) else ""
+    return text if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", text) else ""
+
+
+def _proposals_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """案の一覧（2026-10-19）。案ごとに、題・見積もり・図・主張・利点と代償・補足を1枚のカードにする。
+
+    入れるもの＝`[{"no","title","claim","exhibit","rating","recommended","pros","cons","notes"}]`。
+    `exhibit`＝図の種類（visual/exhibits.py の kind）・`{"kind"|"svg","caption"}`・SVG の文字列。
+    `rating`＝文字列、または `{"accuracy":3,"cost":-1}`（精度向上・コスト削減の見積もり）。
+    返るもの＝縦に並ぶカード。広い画面では左に図・右に説明、狭い画面では縦に積む。
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    cards = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            item = {"title": _stringify(item)}
+        no = _stringify(item.get("no", ""))
+        title = _stringify(item.get("title", ""))
+        recommended = bool(item.get("recommended"))
+        head = '<header class="prop-head">'
+        if no:
+            head += '<span class="prop-no">案%s</span>' % escape(no)
+        head += '<h4 class="prop-title">' + _render_inline(title, glossary_entries, seen_terms) + "</h4>"
+        if recommended:
+            head += '<span class="badge b-%s">推奨</span>' % _badge_tone("good")
+        pick = _safe_pick_id(item.get("pick"))
+        if pick:
+            # 2026-10-19（利用者の指摘）：カード自身で選べる。枠は、判断欄の同じ選択肢の入力を指す label
+            # （script を足さず、押した結果は判断欄の回答文にそのまま入る。選んだ印は _pick_css の :has()）。
+            q = item.get("pick_q")
+            qtext = "判断欄 Q%d と同じ選択" % q if isinstance(q, int) and not isinstance(q, bool) and q > 0 else "判断欄と同じ選択"
+            head += (
+                '<label class="prop-pick" for="%s"><span class="pk-off">☐ これを選ぶ</span>'
+                '<span class="pk-on">☑ 選んだ</span><small>%s</small></label>' % (pick, escape(qtext))
+            )
+        head += "</header>"
+        rate = _proposal_rating_text(item.get("rating", ""))
+        rate_html = '<p class="prop-rate">' + escape(rate) + "</p>" if rate else ""
+        figure = _proposal_figure(item.get("exhibit"))
+        text_parts = []
+        claim = item.get("claim", "")
+        if claim:
+            text_parts.append("<p>" + _inline_with_breaks(claim, glossary_entries, seen_terms) + "</p>")
+        for key, label in (("pros", "利点"), ("cons", "代償")):
+            body = item.get(key, "")
+            if body:
+                text_parts.append(
+                    '<p class="prop-pc"><b>%s</b> %s</p>'
+                    % (label, _inline_with_breaks(body, glossary_entries, seen_terms))
+                )
+        if item.get("notes"):
+            text_parts.append(_bullets_block(item["notes"], glossary_entries, seen_terms))
+        body_html = '<div class="prop-body">' + figure + '<div class="prop-text">' + "".join(text_parts) + "</div></div>"
+        cards.append(
+            '<article class="prop" data-recommended="%d">%s%s%s</article>'
+            % (1 if recommended else 0, head, rate_html, body_html)
+        )
+    return '<div class="props">' + "".join(cards) + "</div>" if cards else ""
+
+
 def _details_body(
     item: Mapping[str, object],
     glossary_entries: Mapping[str, GlossaryEntry],
@@ -3254,7 +3679,117 @@ def _details_body(
         parts.append(_callouts_block(item["callouts"], glossary_entries, seen_terms))
     if item.get("diagram_text"):
         parts.append(_diagram_text_block(item["diagram_text"], glossary_entries, seen_terms))
+    # 2026-11-04（A6・A4）：Mermaid の文字（流れ図・状態・やりとり）と、魚の骨・滝の図・ダンベル。
+    if item.get("mermaid"):
+        parts.append(_mermaid_block(item["mermaid"], glossary_entries, seen_terms))
+    for shape_key in ("fishbone", "waterfall", "dumbbell"):
+        if item.get(shape_key):
+            parts.append(_shapes_block(shape_key, item[shape_key], glossary_entries, seen_terms))
+    if item.get("proposals"):
+        parts.append(_proposals_block(item["proposals"], glossary_entries, seen_terms))
+    if item.get("tabs"):
+        parts.append(_tabs_block(item["tabs"], glossary_entries, seen_terms, item.get("layout")))
+    # 2026-10-31（利用者が選んだ K4）：塊に `fold`（見出しの文）があれば、初めは畳む（開けば全部読める）。
+    fold_label = _stringify(item.get("fold", "")).strip()
+    if fold_label and parts:
+        parts = [
+            '<details class="fold" data-fold><summary>' + escape(fold_label) + "</summary>"
+            + "".join(parts) + "</details>"
+        ]
+    # 2026-10-31（利用者が選んだ M1）：塊に `ref` があれば、同じ印の図の箱とつなぐ（押すと両方が光る）。
+    block_ref = _safe_ref(item.get("ref"))
+    if block_ref and parts:
+        return '<div class="ref-blk" data-ref="%s">%s</div>' % (block_ref, "".join(parts))
     return "".join(parts)
+
+
+def _safe_ref(value: object) -> str:
+    """図の箱と本文の塊をつなぐ印（2026-10-31・M1）。英数字・-・_ だけ（属性に入れるので）。"""
+    text = _stringify(value or "").strip()
+    return text if text and len(text) <= 40 and all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in text) else ""
+
+
+def _walk_html(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+) -> str:
+    """同じ図で一段ずつ追う（2026-10-31・利用者が選んだ M4）。
+
+    入れるもの＝図の `walk`：`[{"ref": 箱の印, "title": "段の名前", "text": "入力・処理・出力"}]`。
+    JS が動く頁では、段の釦で1段だけ見せて図の箱を光らせ、「全部」で全段を見せる。
+    JS が無い・印刷では全段を順に並べる＝条件や段が省かれない。
+    """
+    if not isinstance(value, (list, tuple)) or not value:
+        return ""
+    buttons, steps = [], []
+    for index, item in enumerate(value):
+        if not isinstance(item, Mapping):
+            item = {"text": _stringify(item)}
+        ref = _safe_ref(item.get("ref"))
+        title = _stringify(item.get("title", "")) or "段%d" % (index + 1)
+        text = _stringify(item.get("text", ""))
+        ref_attr = ' data-ref="%s"' % ref if ref else ""
+        buttons.append('<button type="button" aria-pressed="false">%d</button>' % (index + 1))
+        steps.append(
+            '<li class="walk-step"%s><b>%s</b>%s</li>'
+            % (ref_attr, escape(title), ("：" + _render_inline(text, glossary_entries, seen_terms)) if text else "")
+        )
+    buttons.append('<button type="button" aria-pressed="true">全部</button>')
+    return (
+        '<div class="walk" data-walk><div class="walk-bar" role="group" aria-label="段ごとに見る">'
+        + "".join(buttons) + '</div><ol class="walk-steps">' + "".join(steps) + "</ol></div>"
+    )
+
+
+def _tabs_block(
+    value: object,
+    glossary_entries: Mapping[str, GlossaryEntry],
+    seen_terms: set[str],
+    layout: object = None,
+) -> str:
+    """タブ（2026-10-31・利用者の思想・案V7）。同じ形の塊（3件の資料など）を縦に積まず、切り替えて見せる。
+
+    入れるもの＝`[{"label": "見出し", "content": 塊の一覧か辞書か文字列}]`。
+    JS（VIEW_SCRIPT）が動く頁では、見出しの釦で1つずつ見せる（選んだタブを覚える）。
+    JS が無い・印刷では、全部の塊を見出しつきで順に並べる＝情報は消えない。
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    buttons, panels = [], []
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            item = {"label": "タブ%d" % (index + 1), "content": _stringify(item)}
+        label = _stringify(item.get("label", "")) or "タブ%d" % (index + 1)
+        content = item.get("content", "")
+        if isinstance(content, (list, tuple)):
+            inner = _blocks(content, glossary_entries, seen_terms)
+        elif isinstance(content, Mapping):
+            inner = _details_body(content, glossary_entries, seen_terms)
+        else:
+            inner = '<p class="body-copy">' + _render_inline(content, glossary_entries, seen_terms) + "</p>"
+        selected = "true" if index == 0 else "false"
+        # 2026-10-31（利用者の指摘「箱L0とか矢印L2→L1とか書かれてもいちいち覚えてない・指摘あるやつは色変える」）：
+        #   hint＝見出しにマウスを載せる（キーボードで選ぶ）と出す中身。tone＝見出しの色（bad＝赤の地・warn＝黄の地・mild＝黄の線だけ・good・quiet＝薄い字）。
+        hint = _stringify(item.get("hint", "")).strip()
+        tone = _stringify(item.get("tone", "")).strip()
+        tone_attr = ' data-tone="%s"' % tone if tone in ("good", "warn", "mild", "bad", "quiet") else ""
+        hint_attr = (
+            ' data-hint="%s" aria-label="%s"' % (escape(hint, quote=True), escape(label + "：" + hint, quote=True))
+            if hint
+            else ""
+        )
+        buttons.append(
+            '<button type="button" role="tab" class="tab" aria-selected="%s" data-tab="%d"%s%s>%s</button>'
+            % (selected, index, tone_attr, hint_attr, escape(label))
+        )
+        panels.append(
+            '<div class="tab-panel%s" role="tabpanel" data-panel="%d"><h3 class="tab-title">%s</h3>%s</div>'
+            % (" on" if index == 0 else "", index, escape(label), inner)
+        )
+    return (
+        '<div class="tabs" data-tabs%s><div class="tab-list" role="tablist">' % (' data-layout="side"' if layout == "side" else "")
+        + "".join(buttons) + "</div>" + "".join(panels) + "</div>"
+    )
 
 
 def _details_block(
@@ -3296,6 +3831,16 @@ def _details_block(
             + "</div></details>"
         )
     return "".join(rows)
+
+
+FOLD_COMPONENTS = frozenset(("evidence", "glossary"))
+
+
+def _fold(body: str, component: str) -> str:
+    """節の中身を、初めは閉じた折りたたみに入れる。見出し（h2）は外に残すので、どこに何があるかは見える。"""
+    count, unit = (body.count("<tr data-evidence"), "行") if component == "evidence" else (body.count("<dt"), "語")
+    summary = "開いて読む（%d%s）" % (count, unit) if count else "開いて読む"
+    return '<details class="fold" data-fold><summary>%s</summary>%s</details>' % (summary, body)
 
 
 def _example_tone(label: str) -> str:
@@ -3570,6 +4115,7 @@ def _choice_input(
     seen_terms: set[str] | None = None,
     withdrawn: bool = False,
     withdrawn_reason: str = "",
+    input_id: str = "",
 ) -> str:
     """選択肢を1つ組む。⚠️**理由（why）を必ず置けるようにする**のがこの関数の要点。
 
@@ -3645,13 +4191,16 @@ def _choice_input(
                 side_thumb,
             )
         )
+    # 2026-10-19：案のカードの「これを選ぶ」枠（label for）がこの入力を指せるよう、id を付けられる。
+    id_attr = ' id="%s"' % input_id if input_id else ""
     return (
-        '<label class="choice%s"><input type="%s" name="%s" data-req="1" data-label="%s"%s>'
+        '<label class="choice%s"><input type="%s" name="%s"%s data-req="1" data-label="%s"%s>'
         "<span>%s%s%s%s%s</span>%s</label>"
         % (
             " has-thumb" if side_thumb else "",
             kind,
             escape(group, quote=True),
+            id_attr,
             label,
             rec,
             badge_html,
@@ -3840,11 +4389,13 @@ def _decision_block(
                     cons = option.get("cons", "")
                     thumb = option.get("thumb")
                     withdrawn, withdrawn_reason = _withdrawn_info(option.get("withdrawn"))
+                    input_id = _safe_pick_id(option.get("pick_id"))
                 else:
                     label_text, recommended = _decision_parts(option)
                     why, badge, tone = "", "", ""
                     pros, cons, thumb = "", "", None
                     withdrawn, withdrawn_reason = False, ""
+                    input_id = ""
                 if recommended and not badge:
                     badge, tone = "推奨", "good"
                 rows.append(
@@ -3863,6 +4414,7 @@ def _decision_block(
                         seen_terms=seen,
                         withdrawn=withdrawn,
                         withdrawn_reason=withdrawn_reason,
+                        input_id=input_id,
                     )
                 )
         intro_html = (
@@ -4048,6 +4600,28 @@ def _provenance_block(
 _REVIEW_ROLES = ("shiteki", "tensaku")
 
 
+_PICK_FOR = re.compile(r'class="prop-pick" for="([A-Za-z0-9_-]+)"')
+
+
+def _pick_css(body_html: str) -> str:
+    """案のカードの「これを選ぶ」枠ごとに、判断欄の入力が選ばれたときの見た目を足す。
+
+    枠は label で、押すと判断欄の入力が切り替わる（script は要らない）。選んだ印は :has() で、入力の状態から
+    出す。:has() に対応しない古い画面では、印は変わらないが、判断欄の選択と回答文は同じに動く。
+    規則は1本ずつ分ける（片方を読めない画面でも、もう片方が効くように）。id は英数字・「-」「_」だけ。
+    """
+    out: list[str] = []
+    for pid in dict.fromkeys(_PICK_FOR.findall(body_html)):
+        on = "body:has(#%s:checked) " % pid
+        label = 'label.prop-pick[for="%s"]' % pid
+        out.append(on + label + "{background:var(--pass);border-color:var(--pass);color:var(--on-accent)}")
+        out.append(on + label + " small{color:var(--on-accent)}")
+        out.append(on + label + " .pk-off{display:none}")
+        out.append(on + label + " .pk-on{display:inline}")
+        out.append(on + '.prop:has(label[for="%s"]){border-color:var(--pass);box-shadow:0 0 0 1px var(--pass)}' % pid)
+    return "".join(out)
+
+
 def _extra_css(body_html: str, roles: Sequence[str], has_manuscript: bool) -> str:
     """頁の末尾の `<style>` へ足す CSS。使う機能のある頁にだけ足す（無ければ空文字＝今までと同じ）。"""
     parts: list[str] = []
@@ -4055,6 +4629,11 @@ def _extra_css(body_html: str, roles: Sequence[str], has_manuscript: bool) -> st
         parts.append(WITHDRAWN_CSS)
     if 'class="dia-q"' in body_html:
         parts.append(DIA_Q_CSS)
+    if 'class="props"' in body_html:
+        parts.append(PROPOSALS_CSS)
+        picked = _pick_css(body_html)
+        if picked:
+            parts.append(picked)
     if has_manuscript:
         parts.append(MANUSCRIPT_CSS)
     if _review_scripts is not None and roles:
@@ -4147,6 +4726,20 @@ def _manuscript_block(value: object) -> str:
     )
 
 
+def _view_bar_html(has_decision: bool) -> str:
+    """上部の操作バー（2026-10-31・利用者の思想・案V6・V7）。JS（VIEW_SCRIPT）が動くときだけ見える。"""
+    go = '<a class="vb-go" href="#q-1">判断へ</a>' if has_decision else ""
+    return (
+        '<nav id="view-bar" class="view-bar" aria-label="表示の切り替え">'
+        '<button type="button" id="vb-mode" aria-pressed="false">要点だけ</button>'
+        '<button type="button" id="vb-open">全部開く</button>'
+        '<button type="button" id="vb-close">全部閉じる</button>'
+        '<button type="button" id="vb-warn" aria-pressed="false">注意だけ</button>'
+        + go +
+        '<span class="vb-hint">j / k で節を移動</span></nav>'
+    )
+
+
 def render_components(
     plan: ExplanationPlan,
     *,
@@ -4160,8 +4753,11 @@ def render_components(
     planned = set(plan.components)
     # 画像の実測行（B2）＝ここでクリアしてから積む。1頁1回のクリアなので
     # モジュール単位の状態でも安全（この道具は1プロセスで1頁ずつ順に組む）。
-    global _PAGE_HAS_EVIDENCE_SECTION
+    global _PAGE_HAS_EVIDENCE_SECTION, _HOVER_IMAGES
     _IMAGE_EVIDENCE_LINES.clear()
+    hover_spec = content.get("hover_images")
+    _HOVER_IMAGES = dict(hover_spec) if isinstance(hover_spec, Mapping) else {}
+    _HOVER_USED.clear()
     sections_probe = content.get("sections")
     sections_probe_components = {
         _stringify(entry.get("component", ""))
@@ -4222,6 +4818,9 @@ def render_components(
             extra_attr = ' data-review-mode="%s"' % mode
         else:
             body = _text_block(body_value, component, entries, seen_terms)
+            # 2026-10-31（利用者の思想・案V4＝頁の構成の型）：根拠と用語は、初めは畳む（開けば全部読める）。
+            if component in FOLD_COMPONENTS and body:
+                body = _fold(body, component)
         heading = _render_inline(label, entries, seen_terms)
         num_html = (
             '<span class="sec-no">' + escape(num) + "</span>" if num else ""
@@ -4271,6 +4870,7 @@ def render_components(
         sections.append(
             _one_section(component, content[component], LABELS.get(component, component), "")
         )
+    hover_store = _hover_store_html()
     # B2：画像の実測行を evidence 節の末尾へ足す（無ければこの一覧はもう捨てる＝
     # `_image_block` が「evidence が無い頁は図の下に出す」を自分で済ませている）。
     if _IMAGE_EVIDENCE_LINES and _PAGE_HAS_EVIDENCE_SECTION:
@@ -4325,7 +4925,10 @@ def render_components(
         for key in seen_terms:
             display = key.strip("`").strip()
             if display:
-                glossary_counts[key] = _count_term(body_plain, display)
+                rule_entry = entries.get(key)
+                glossary_counts[key] = _count_term(
+                    body_plain, display, rule_entry.cues if rule_entry is not None else None
+                )
     rail_html = _rail_block(
         rail_spec, entries, seen_terms, toc_entries, glossary_counts=glossary_counts
     )
@@ -4341,11 +4944,12 @@ def render_components(
     )
     # 2026-10-09：赤ペンの script と CSS・単位の番号。review を書かない定義（none）の頁は今までと同じ出力。
     review_roles = _roles_for(page_review_mode, manuscript_modes)
+    view_bar = _view_bar_html(any('data-component="decision"' in sec for sec in sections))
     body_html = (
         f'<div class="wrap"{layout_attr}><header{header_component}><div class="head-row">'
         f'<p class="eyebrow">{eyebrow_html}</p><button id="theme-toggle" type="button">'
-        f'明暗を切り替える</button></div><h1>{h1_html}</h1>{lede}</header>{flow_open}'
-        f"{''.join(sections)}{flow_close}{rail_html}{provenance}</div>"
+        f'明暗を切り替える</button></div><h1>{h1_html}</h1>{lede}</header>{view_bar}{flow_open}'
+        f"{''.join(sections)}{flow_close}{rail_html}{hover_store}{provenance}</div>"
     )
     if page_review_mode != "none" and number_blocks is not None:
         body_html, _block_infos = number_blocks(body_html)
@@ -4371,7 +4975,7 @@ section{{display:flex;flex-direction:column;gap:.95rem}}h2{{font-family:"Zen Old
 ol.steps{{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.7rem;counter-reset:st}}ol.steps li{{counter-increment:st;display:grid;grid-template-columns:1.9rem 1fr;gap:.85rem;background:var(--surface);border:1px solid var(--rule);border-left:3px solid var(--accent);border-radius:2px;padding:.85rem 1rem}}ol.steps li::before{{content:counter(st);font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:1.05rem;color:var(--accent);text-align:center;font-weight:600}}ol.steps .body{{display:flex;flex-direction:column;gap:.3rem;min-width:0}}ol.steps .ttl{{font-weight:700;font-size:.97rem}}ol.steps p{{font-size:.91rem;color:var(--ink-2)}}
 ol.steps li[data-tone="risk"]{{border-left-color:var(--fail)}}ol.steps li[data-tone="risk"]::before,ol.steps li[data-tone="risk"] .ttl{{color:var(--fail)}}ol.steps li[data-tone="decision"]{{border-left-color:var(--pass)}}ol.steps li[data-tone="decision"]::before,ol.steps li[data-tone="decision"] .ttl{{color:var(--pass)}}
 .flow-map{{display:grid;justify-items:center;gap:.55rem}}.flow-step{{width:min(100%,42rem);padding:.75rem 1rem;border:1px solid var(--rule);border-left:3px solid var(--accent);border-radius:2px;background:var(--surface);color:var(--ink);font-weight:700;text-align:left}}.flow-arrow{{color:var(--accent);font:600 1.1rem/1 "IBM Plex Mono",monospace}}
-.scroll{{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:2px}}table{{border-collapse:collapse;width:100%;font-size:.86rem}}th,td{{padding:.55rem .7rem;border-bottom:1px solid var(--rule-soft);text-align:left;vertical-align:top}}thead th{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.71rem;letter-spacing:.05em;color:var(--ink-2);font-weight:500;background:var(--surface-2);border-bottom:1px solid var(--rule);white-space:nowrap}}tbody tr:last-child td,tbody tr:last-child th{{border-bottom:none}}td.num,th.num{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}}td.ok{{color:var(--pass);font-weight:600}}td.ng{{background:var(--fail-soft);color:var(--fail);font-weight:600}}.src{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.68rem;letter-spacing:.08em;padding:.1rem .4rem;border-radius:2px;font-weight:500}}.s-m{{background:var(--pass-soft);color:var(--pass)}}.s-a{{background:var(--warn-soft);color:var(--warn)}}.s-r{{background:var(--accent-soft);color:var(--accent)}}.s-x{{background:var(--fail-soft);color:var(--fail)}}
+.scroll{{overflow-x:auto;background:var(--surface);border:1px solid var(--rule);border-radius:2px}}table{{border-collapse:collapse;width:100%;font-size:.86rem}}th,td{{padding:.55rem .7rem;border-bottom:1px solid var(--rule-soft);text-align:left;vertical-align:top}}thead th{{font-size:.78rem;letter-spacing:.02em;color:var(--ink-2);font-weight:700;background:var(--surface-2);border-bottom:1px solid var(--rule);white-space:nowrap}}tbody tr:last-child td,tbody tr:last-child th{{border-bottom:none}}td.num,th.num{{font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}}td.ok{{color:var(--pass);font-weight:600}}td.ng{{background:var(--fail-soft);color:var(--fail);font-weight:600}}.src{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.68rem;letter-spacing:.08em;padding:.1rem .4rem;border-radius:2px;font-weight:500}}.s-m{{background:var(--pass-soft);color:var(--pass)}}.s-a{{background:var(--warn-soft);color:var(--warn)}}.s-r{{background:var(--accent-soft);color:var(--accent)}}.s-x{{background:var(--fail-soft);color:var(--fail)}}
 dl.gl{{margin:0;display:grid;grid-template-columns:auto 1fr;gap:.4rem 1rem;font-size:.9rem}}dl.gl dt{{font-weight:700;color:var(--ink);white-space:nowrap}}dl.gl dd{{margin:0;color:var(--ink-2)}}
 details{{background:var(--surface);border:1px solid var(--rule);border-radius:2px;padding:.7rem 1rem}}details summary{{cursor:pointer;font-weight:500;font-size:.93rem}}details[open] summary{{margin-bottom:.6rem;padding-bottom:.5rem;border-bottom:1px solid var(--rule-soft)}}details .in{{font-size:.9rem;color:var(--ink-2)}}footer{{border-top:1px solid var(--rule);padding-top:1.1rem;font-size:.8rem;color:var(--ink-3)}}.provenance-items{{display:flex;flex-wrap:wrap;gap:.35rem 1rem}}.provenance-item{{overflow-wrap:anywhere}}
 .note{{background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:1rem}}.note.warn{{border-top-color:var(--warn)}}.note.warn h3{{color:var(--warn)}}.note.bad{{border-top-color:var(--fail)}}.note.bad h3{{color:var(--fail)}}.note.good{{border-top-color:var(--pass)}}.note.good h3{{color:var(--pass)}}.note h3{{color:var(--accent)}}.ex{{background:var(--surface-2);border-radius:2px;padding:.6rem .8rem;font-size:.88rem;color:var(--ink-2)}}.ex b{{color:var(--ink)}}
@@ -4380,7 +4984,7 @@ details{{background:var(--surface);border:1px solid var(--rule);border-radius:2p
 fieldset{{margin:0;padding:0;border:0}}legend{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;letter-spacing:.08em;color:var(--ink-2)}}.choice{{display:flex;min-height:48px;gap:.75rem;align-items:flex-start;padding:.75rem .9rem;margin:.55rem 0;border:1px solid var(--rule);border-radius:2px;background:var(--surface);cursor:pointer}}.choice:hover,.choice:has(input:checked){{border-color:var(--accent);background:var(--accent-soft)}}input[type="radio"]{{margin-top:.42rem;accent-color:var(--accent)}}
 section,p,pre,.choice,span,.scroll,.flow-map,.flow-cols,details,ul.bullets{{min-width:0;overflow-wrap:anywhere}}pre{{white-space:pre-wrap;word-break:break-word;padding:.7rem 1rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);font:500 .86rem/1.7 "IBM Plex Mono",ui-monospace,monospace}}button{{min-height:44px;padding:.65rem 1rem;border:1px solid var(--accent-2);border-radius:2px;background:var(--accent);color:var(--on-accent);font-weight:700;cursor:pointer}}button:hover{{background:var(--accent-2)}}button:focus-visible,.choice:focus-within{{outline:3px solid color-mix(in srgb,var(--focus) 48%,transparent);outline-offset:2px}}
 .recommendation{{display:inline-block;margin-left:.4rem;padding:.08rem .38rem;border-radius:2px;background:var(--pass-soft);color:var(--pass);font:600 .7rem/1.5 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.04em}}.objection-freeform{{display:block;margin:.8rem 0 .35rem;font-weight:700}}.objection-freeform+textarea{{display:block;width:100%;min-height:6rem;padding:.65rem .75rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;resize:vertical}}.decision-actions{{display:flex;flex-wrap:wrap;gap:.55rem}}button.secondary{{background:var(--surface);color:var(--accent);border-color:var(--accent)}}button.secondary:hover{{background:var(--accent-soft)}}
-ol.numbered{{margin:0;padding-left:1.4rem;display:flex;flex-direction:column;gap:.35rem;font-size:.9rem;color:var(--ink-2)}}dl.pairs{{margin:0;display:grid;grid-template-columns:auto 1fr;gap:.35rem .9rem;font-size:.9rem}}dl.pairs dt{{font-weight:700;color:var(--ink);white-space:nowrap}}dl.pairs dd{{margin:0;color:var(--ink-2)}}blockquote{{margin:0;padding:.7rem 1rem;border-left:3px solid var(--rule);background:var(--surface-2);color:var(--ink-2);font-size:.92rem}}mark{{background:var(--warn-soft);color:var(--ink);padding:0 .15em;border-radius:2px}}em{{font-style:normal;font-weight:600;color:var(--ink)}}hr{{border:0;border-top:1px solid var(--rule);margin:.4rem 0}}.number-row{{align-items:center;gap:.6rem}}.number-row input[type="number"]{{width:8rem;padding:.45rem .6rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-variant-numeric:tabular-nums;text-align:right}}.number-row .unit{{color:var(--ink-3);font-size:.85rem}}input[type="checkbox"]{{margin-top:.42rem;accent-color:var(--accent)}}.badge{{display:inline-block;padding:.08rem .42rem;border-radius:2px;font:600 .72rem/1.6 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.03em;border:1px solid transparent;vertical-align:.05em;max-width:100%;overflow-wrap:anywhere}}.b-acc{{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}}.b-good{{background:var(--pass-soft);color:var(--pass);border-color:var(--pass)}}.b-warn{{background:var(--warn-soft);color:var(--warn);border-color:var(--warn)}}.b-bad{{background:var(--fail-soft);color:var(--fail);border-color:var(--fail)}}.b-new{{background:var(--new-soft);color:var(--new);border-color:var(--new)}}.cols{{display:grid;gap:1rem;min-width:0;align-items:start}}.cols[data-cols="2"]{{grid-template-columns:1fr 1fr}}.cols[data-cols="3"]{{grid-template-columns:1fr 1fr 1fr}}.cols[data-cols="4"]{{grid-template-columns:repeat(4,1fr)}}.col{{display:flex;flex-direction:column;gap:.6rem;min-width:0}}.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.6rem;min-width:0}}.tile{{background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:.6rem .75rem;display:flex;flex-direction:column;gap:.2rem;min-width:0}}.tile b{{font-size:.9rem}}.tile span{{font-size:.83rem;color:var(--ink-2);line-height:1.7}}.tile[data-tone="good"]{{border-top-color:var(--pass)}}.tile[data-tone="warn"]{{border-top-color:var(--warn)}}.tile[data-tone="bad"]{{border-top-color:var(--fail)}}.tile[data-tone="new"]{{border-top-color:var(--new)}}.sec-no{{display:inline-block;min-width:1.9rem;margin-right:.5rem;padding:.05rem .35rem;border-radius:2px;background:var(--accent-soft);color:var(--accent);font:700 .78rem/1.7 "IBM Plex Mono",ui-monospace,monospace;text-align:center;vertical-align:.16em}}.why{{display:block;margin-top:.3rem;font-size:.83rem;line-height:1.7;color:var(--ink-3)}}.intro{{font-size:.88rem;color:var(--ink-2);margin:.15rem 0 .5rem}}fieldset+fieldset{{margin-top:1.4rem}}.scale-row{{border-left:3px solid var(--rule);padding:.1rem 0 .5rem .9rem;margin:.9rem 0}}.scale-head{{font-size:.93rem;margin:0 0 .2rem}}.scale-body{{font-size:.85rem;color:var(--ink-2);margin:0 0 .45rem}}.picks{{display:flex;flex-wrap:wrap;gap:.2rem .9rem}}.pick{{display:inline-flex;align-items:center;gap:.3rem;font-size:.87rem;cursor:pointer;min-height:32px}}.pick input{{margin:0;accent-color:var(--accent)}}.card .obj-row{{margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--rule-soft)}}.card .choice{{min-height:auto;padding:.3rem .5rem;background:transparent;border:0}}.scores{{float:right;margin-left:.6rem}}.card-stack{{display:flex;flex-direction:column;gap:.8rem;min-width:0}}.card{{background:var(--surface);border:1px solid var(--rule);border-left:3px solid var(--accent);border-radius:2px;padding:.9rem 1.05rem;display:flex;flex-direction:column;gap:.45rem;min-width:0}}.card h3{{font-size:.97rem;line-height:1.6}}.card p{{font-size:.92rem;color:var(--ink-2)}}.card[data-tone="good"]{{border-left-color:var(--pass)}}.card[data-tone="warn"]{{border-left-color:var(--warn)}}.card[data-tone="bad"]{{border-left-color:var(--fail)}}.card[data-tone="new"]{{border-left-color:var(--new)}}.obj-row{{display:flex;flex-direction:column;gap:.3rem;margin:.55rem 0}}.obj-row .choice{{margin:0}}.obj-why{{width:100%;padding:.5rem .65rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem}}section h3{{margin-top:.5rem;color:var(--ink);letter-spacing:.01em}}.dia-wrap{{overflow-x:auto;min-width:0}}svg.dia{{display:block;max-width:100%;height:auto;font-family:"Zen Kaku Gothic New","Yu Gothic",system-ui,sans-serif}}svg.tl,svg.quad,svg.venn,svg.flow,svg.score,svg.svg-in{{display:block;width:100%;height:auto}}.flow-cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.55rem;width:min(100%,42rem)}}.flow-cell{{padding:.7rem .9rem;border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;background:var(--surface);font-size:.92rem}}pre.log{{white-space:pre-wrap;word-break:break-word;padding:.7rem 1rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);font:500 .82rem/1.7 "IBM Plex Mono",ui-monospace,monospace;overflow-x:auto;margin:0}}caption{{caption-side:bottom;text-align:left;font-size:.8rem;color:var(--ink-3);padding:.5rem .7rem;border-top:1px solid var(--rule-soft)}}ul.bullets{{margin:0;padding-left:1.2rem;display:flex;flex-direction:column;gap:.3rem;font-size:.9rem;color:var(--ink-2)}}#theme-toggle{{min-height:auto;padding:.35rem .7rem;font:500 .74rem/1.5 "IBM Plex Mono",ui-monospace,monospace;background:var(--surface);color:var(--ink-2);border:1px solid var(--rule)}}#theme-toggle:hover{{background:var(--surface-2);color:var(--ink)}}.flow{{display:flex;flex-direction:column;gap:clamp(2rem,4vw,2.9rem);min-width:0}}.rail{{display:flex;flex-direction:column;gap:.7rem;min-width:0;background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:1rem 1.1rem}}.rail-head{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;letter-spacing:.1em;color:var(--accent);margin:0}}.rail .cap,.rail p{{font-size:.85rem}}.rail table{{font-size:.8rem}}.rail ul.bullets{{font-size:.85rem}}.wrap[data-layout="rail"]{{max-width:74rem}}.wrap[data-layout="rail"]>.rail{{order:-1}}@media(min-width:1000px){{.wrap[data-layout="rail"]{{display:grid;grid-template-columns:minmax(0,1fr) 19rem;column-gap:2.4rem;row-gap:clamp(2rem,4vw,2.9rem);align-items:start}}.wrap[data-layout="rail"]>header,.wrap[data-layout="rail"]>footer{{grid-column:1 / -1}}.wrap[data-layout="rail"]>.rail{{order:0;position:sticky;top:1.6rem;max-height:calc(100vh - 3.2rem);overflow:auto}}}}section{{scroll-margin-top:1.2rem}}.toc ol{{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.1rem}}.toc a{{display:flex;gap:.45rem;align-items:baseline;padding:.25rem .35rem;border-radius:2px;color:var(--ink-2);text-decoration:none;font-size:.85rem;line-height:1.55}}.toc a:hover,.toc a:focus-visible{{background:var(--accent-soft);color:var(--accent)}}.toc-no{{font:600 .7rem/1.6 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent);min-width:1.6rem;flex:none}}.toc a[aria-current]{{background:var(--accent-soft);color:var(--accent);font-weight:700}}.toc a[aria-current] .toc-no{{color:var(--accent-2)}}@media(min-width:601px){{.t[data-flip]::after{{left:auto;right:0}}}}.head-row{{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;justify-content:space-between}}
+ol.numbered{{margin:0;padding-left:1.4rem;display:flex;flex-direction:column;gap:.35rem;font-size:.9rem;color:var(--ink-2)}}dl.pairs{{margin:0;display:grid;grid-template-columns:auto 1fr;gap:.35rem .9rem;font-size:.9rem}}dl.pairs dt{{font-weight:700;color:var(--ink);white-space:nowrap}}dl.pairs dd{{margin:0;color:var(--ink-2)}}blockquote{{margin:0;padding:.7rem 1rem;border-left:3px solid var(--rule);background:var(--surface-2);color:var(--ink-2);font-size:.92rem}}mark{{background:var(--warn-soft);color:var(--ink);padding:0 .15em;border-radius:2px}}em{{font-style:normal;font-weight:600;color:var(--ink)}}hr{{border:0;border-top:1px solid var(--rule);margin:.4rem 0}}.number-row{{align-items:center;gap:.6rem}}.number-row input[type="number"]{{width:8rem;padding:.45rem .6rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-variant-numeric:tabular-nums;text-align:right}}.number-row .unit{{color:var(--ink-3);font-size:.85rem}}input[type="checkbox"]{{margin-top:.42rem;accent-color:var(--accent)}}.badge{{display:inline-block;padding:.08rem .42rem;border-radius:2px;font-weight:700;font-size:.74rem;line-height:1.6;letter-spacing:.02em;border:1px solid transparent;vertical-align:.05em;max-width:100%;overflow-wrap:anywhere}}.b-acc{{background:var(--accent-soft);color:var(--accent);border-color:var(--accent)}}.b-good{{background:var(--pass-soft);color:var(--pass);border-color:var(--pass)}}.b-warn{{background:var(--warn-soft);color:var(--warn);border-color:var(--warn)}}.b-bad{{background:var(--fail-soft);color:var(--fail);border-color:var(--fail)}}.b-new{{background:var(--new-soft);color:var(--new);border-color:var(--new)}}.cols{{display:grid;gap:1rem;min-width:0;align-items:start}}.cols[data-cols="2"]{{grid-template-columns:1fr 1fr}}.cols[data-cols="3"]{{grid-template-columns:1fr 1fr 1fr}}.cols[data-cols="4"]{{grid-template-columns:repeat(4,1fr)}}.col{{display:flex;flex-direction:column;gap:.6rem;min-width:0}}.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.6rem;min-width:0}}.tile{{background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:.6rem .75rem;display:flex;flex-direction:column;gap:.2rem;min-width:0}}.tile b{{font-size:.9rem}}.tile span{{font-size:.83rem;color:var(--ink-2);line-height:1.7}}.tile[data-tone="good"]{{border-top-color:var(--pass)}}.tile[data-tone="warn"]{{border-top-color:var(--warn)}}.tile[data-tone="bad"]{{border-top-color:var(--fail)}}.tile[data-tone="new"]{{border-top-color:var(--new)}}.sec-no{{display:inline-block;min-width:1.9rem;margin-right:.5rem;padding:.05rem .35rem;border-radius:2px;background:var(--accent-soft);color:var(--accent);font:700 .78rem/1.7 "IBM Plex Mono",ui-monospace,monospace;text-align:center;vertical-align:.16em}}.why{{display:block;margin-top:.3rem;font-size:.83rem;line-height:1.7;color:var(--ink-3)}}.intro{{font-size:.88rem;color:var(--ink-2);margin:.15rem 0 .5rem}}fieldset+fieldset{{margin-top:1.4rem}}.scale-row{{border-left:3px solid var(--rule);padding:.1rem 0 .5rem .9rem;margin:.9rem 0}}.scale-head{{font-size:.93rem;margin:0 0 .2rem}}.scale-body{{font-size:.85rem;color:var(--ink-2);margin:0 0 .45rem}}.picks{{display:flex;flex-wrap:wrap;gap:.2rem .9rem}}.pick{{display:inline-flex;align-items:center;gap:.3rem;font-size:.87rem;cursor:pointer;min-height:32px}}.pick input{{margin:0;accent-color:var(--accent)}}.card .obj-row{{margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--rule-soft)}}.card .choice{{min-height:auto;padding:.3rem .5rem;background:transparent;border:0}}.scores{{float:right;margin-left:.6rem}}.card-stack{{display:flex;flex-direction:column;gap:.8rem;min-width:0}}.card{{background:var(--surface);border:1px solid var(--rule);border-left:3px solid var(--accent);border-radius:2px;padding:.9rem 1.05rem;display:flex;flex-direction:column;gap:.45rem;min-width:0}}.card h3{{font-size:.97rem;line-height:1.6}}.card p{{font-size:.92rem;color:var(--ink-2)}}.card[data-tone="good"]{{border-left-color:var(--pass)}}.card[data-tone="warn"]{{border-left-color:var(--warn)}}.card[data-tone="bad"]{{border-left-color:var(--fail)}}.card[data-tone="new"]{{border-left-color:var(--new)}}.obj-row{{display:flex;flex-direction:column;gap:.3rem;margin:.55rem 0}}.obj-row .choice{{margin:0}}.obj-why{{width:100%;padding:.5rem .65rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem}}section h3{{margin-top:.5rem;color:var(--ink);letter-spacing:.01em}}.dia-wrap{{overflow-x:auto;min-width:0}}svg.dia{{display:block;max-width:100%;height:auto;font-family:"Zen Kaku Gothic New","Yu Gothic",system-ui,sans-serif}}svg.tl,svg.quad,svg.venn,svg.flow,svg.score,svg.svg-in{{display:block;width:100%;height:auto}}.flow-cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));gap:.55rem;width:min(100%,42rem)}}.flow-cell{{padding:.7rem .9rem;border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;background:var(--surface);font-size:.92rem}}pre.log{{white-space:pre-wrap;word-break:break-word;padding:.7rem 1rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);font:500 .82rem/1.7 "IBM Plex Mono",ui-monospace,monospace;overflow-x:auto;margin:0}}caption{{caption-side:bottom;text-align:left;font-size:.8rem;color:var(--ink-3);padding:.5rem .7rem;border-top:1px solid var(--rule-soft)}}ul.bullets{{margin:0;padding-left:1.2rem;display:flex;flex-direction:column;gap:.3rem;font-size:.9rem;color:var(--ink-2)}}#theme-toggle{{min-height:auto;padding:.35rem .7rem;font:500 .74rem/1.5 "IBM Plex Mono",ui-monospace,monospace;background:var(--surface);color:var(--ink-2);border:1px solid var(--rule)}}#theme-toggle:hover{{background:var(--surface-2);color:var(--ink)}}.flow{{display:flex;flex-direction:column;gap:clamp(2rem,4vw,2.9rem);min-width:0}}.rail{{display:flex;flex-direction:column;gap:.7rem;min-width:0;background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:1rem 1.1rem}}.rail-head{{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;letter-spacing:.1em;color:var(--accent);margin:0}}.rail .cap,.rail p{{font-size:.85rem}}.rail table{{font-size:.8rem}}.rail ul.bullets{{font-size:.85rem}}.wrap[data-layout="rail"]{{max-width:74rem}}.wrap[data-layout="rail"]>.rail{{order:-1}}@media(min-width:1000px){{.wrap[data-layout="rail"]{{display:grid;grid-template-columns:minmax(0,1fr) 19rem;column-gap:2.4rem;row-gap:clamp(2rem,4vw,2.9rem);align-items:start}}.wrap[data-layout="rail"]>header,.wrap[data-layout="rail"]>footer{{grid-column:1 / -1}}.wrap[data-layout="rail"]>.rail{{order:0;position:sticky;top:1.6rem;max-height:calc(100vh - 3.2rem);overflow:auto}}}}section{{scroll-margin-top:1.2rem}}.toc ol{{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.1rem}}.toc a{{display:flex;gap:.45rem;align-items:baseline;padding:.25rem .35rem;border-radius:2px;color:var(--ink-2);text-decoration:none;font-size:.85rem;line-height:1.55}}.toc a:hover,.toc a:focus-visible{{background:var(--accent-soft);color:var(--accent)}}.toc-no{{font:600 .7rem/1.6 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent);min-width:1.6rem;flex:none}}.toc a[aria-current]{{background:var(--accent-soft);color:var(--accent);font-weight:700}}.toc a[aria-current] .toc-no{{color:var(--accent-2)}}@media(min-width:601px){{.t[data-flip]::after{{left:auto;right:0}}}}.head-row{{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;justify-content:space-between}}
 @media(prefers-reduced-motion:reduce){{*,*::before,*::after{{transition:none !important;animation:none !important}}}}
 @media(max-width:600px){{.wrap{{padding-inline:1rem}}.cols[data-cols]{{grid-template-columns:1fr}}.item-row{{grid-template-columns:1fr;gap:.35rem}}dl.gl{{grid-template-columns:1fr}}dl.gl dt{{white-space:normal}}.t::after{{position:fixed;left:1rem;right:1rem;top:auto;bottom:1rem;width:auto;max-height:40vh;overflow:auto}}section[data-component="evidence"] .scroll{{border:0;background:transparent;overflow:visible}}section[data-component="evidence"] table,section[data-component="evidence"] tbody,section[data-component="evidence"] tr,section[data-component="evidence"] td{{display:block;width:100%}}section[data-component="evidence"] thead{{display:none}}section[data-component="evidence"] tbody{{display:grid;gap:.7rem}}section[data-component="evidence"] tr{{border:1px solid var(--rule);border-radius:2px;background:var(--surface)}}section[data-component="evidence"] td{{display:block;border-bottom:1px solid var(--rule-soft)}}section[data-component="evidence"] td:last-child{{border-bottom:0}}section[data-component="evidence"] td::before{{content:attr(data-label);display:block;margin-bottom:.15rem;font:500 .68rem/1.6 "IBM Plex Mono",ui-monospace,monospace;color:var(--ink-3)}}section[data-component="evidence"] td.num{{text-align:left;white-space:normal}}section[data-component="evidence"] .source code{{overflow-wrap:anywhere;word-break:break-word}}}}
 @media(max-width:600px){{.dia-node-tip{{left:1rem !important;right:1rem;top:auto !important;bottom:1rem;width:auto;max-height:48vh;overflow:auto}}.dia-node-tip__row{{grid-template-columns:4.6rem minmax(0,1fr)}}}}
@@ -4393,17 +4997,21 @@ pre.log.diff{{padding:.7rem 0}}pre.log.diff span{{display:block;padding:0 1rem}}
 .img-figure{{margin:0;display:flex;flex-direction:column;gap:.4rem;min-width:0}}.img-frame{{position:relative;overflow:hidden;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);line-height:0}}.img-frame img{{display:block;width:100%;height:auto}}.img-frame[data-zoom]{{cursor:zoom-in}}.img-figure figcaption{{font-size:.8rem;color:var(--ink-3)}}.marks{{position:absolute;inset:0;width:100%;height:100%}}.cap.img-src{{margin-top:.2rem}}
 .zoom-overlay{{position:fixed;inset:0;background:color-mix(in srgb,#000 82%,transparent);display:flex;align-items:center;justify-content:center;z-index:999;padding:2rem;cursor:zoom-out}}.zoom-overlay .img-frame{{cursor:zoom-out;max-width:min(92vw,1100px);max-height:92vh;border-color:var(--surface)}}.zoom-overlay img{{max-height:88vh;width:auto;max-width:100%}}
 .cell-bar{{display:inline-block;width:3.4rem;height:.5rem;margin-left:.5rem;background:var(--surface-2);border:1px solid var(--rule);border-radius:2px;overflow:hidden;vertical-align:middle}}.cell-bar-fill{{display:block;height:100%;background:var(--accent)}}
-.pin{{display:inline-grid;place-items:center;min-width:1.35rem;height:1.35rem;padding:0 .3rem;border-radius:999px;background:var(--accent);color:var(--on-accent);font:700 .72rem/1 "IBM Plex Mono",ui-monospace,monospace;vertical-align:.08em;margin-right:.35rem}}.pin[data-tone="good"]{{background:var(--pass)}}.pin[data-tone="warn"]{{background:var(--warn)}}.pin[data-tone="bad"]{{background:var(--fail)}}.pin[data-tone="new"]{{background:var(--new)}}.pin[data-tone="acc"]{{background:var(--accent)}}.of{{color:var(--ink-3)}}td.stackcell{{min-width:7.5rem}}td.stackcell .v{{display:block;font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}}.stack{{display:flex;gap:2px;height:.5rem;width:7.5rem;max-width:100%;margin-top:.3rem;border-radius:2px;overflow:hidden;background:var(--surface-2)}}.stack i{{display:block;height:100%;min-width:3px}}.stack i[data-tone="good"],.stack-legend i[data-tone="good"]{{background:var(--pass)}}.stack i[data-tone="warn"],.stack-legend i[data-tone="warn"]{{background:var(--warn)}}.stack i[data-tone="bad"],.stack-legend i[data-tone="bad"]{{background:var(--fail)}}.stack i[data-tone="new"],.stack-legend i[data-tone="new"]{{background:var(--new)}}.stack i[data-tone="acc"],.stack-legend i[data-tone="acc"]{{background:var(--accent)}}.stack-legend{{display:flex;flex-wrap:wrap;gap:.3rem 1rem;font-size:.8rem;color:var(--ink-2);margin:.1rem 0 .45rem}}.stack-legend span{{display:inline-flex;align-items:center;gap:.35rem}}.stack-legend i{{display:inline-block;width:.7rem;height:.7rem;border-radius:2px}}.cell-note{{display:block;margin-top:.15rem;font-family:inherit;font-size:.76rem;line-height:1.55;color:var(--ink-3);white-space:normal;text-align:left}}td.num .cell-note{{font-family:"Zen Kaku Gothic New",system-ui,sans-serif}}tr.grp td,tr.grp th{{border-top:2px solid var(--rule)}}tbody th[scope="row"]{{font-weight:700;color:var(--ink);background:transparent}}tbody th[scope="row"]{{min-width:6.5rem}}@media(max-width:600px){{td.stackcell{{min-width:5.6rem}}.stack{{width:5.6rem}}}}.img-pin{{position:absolute;transform:translate(-50%,-50%);display:inline-grid;place-items:center;min-width:1.5rem;height:1.5rem;padding:0 .3rem;border-radius:999px;font:700 .76rem/1 "IBM Plex Mono",ui-monospace,monospace;background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 2px var(--surface);pointer-events:none}}.img-pin[data-tone="good"]{{background:var(--pass)}}.img-pin[data-tone="warn"]{{background:var(--warn)}}.img-pin[data-tone="bad"]{{background:var(--fail)}}.img-pin[data-style="box"]{{transform:translate(-35%,-35%);background:var(--surface);color:var(--fail);border:1.5px solid var(--fail);box-shadow:none}}.img-pin[data-style="box"][data-tone="good"]{{color:var(--pass);border-color:var(--pass)}}.img-pin[data-style="box"][data-tone="warn"]{{color:var(--warn);border-color:var(--warn)}}.img-pin[data-style="box"][data-tone="acc"]{{color:var(--accent);border-color:var(--accent)}}.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:.7rem;min-width:0}}.stat{{background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:.9rem 1rem;display:flex;flex-direction:column;gap:.25rem;min-width:0}}.stat-num{{font:500 2rem/1.15 "IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--ink);overflow-wrap:anywhere}}.stat-num small{{font:500 .85rem/1 "Zen Kaku Gothic New",system-ui,sans-serif;color:var(--ink-2);margin-left:.35rem}}.stat-label{{font-weight:700;font-size:.9rem}}.stat-sub{{margin:0;font-size:.83rem;line-height:1.7;color:var(--ink-2)}}.stat[data-tone="good"]{{border-top-color:var(--pass)}}.stat[data-tone="warn"]{{border-top-color:var(--warn)}}.stat[data-tone="bad"]{{border-top-color:var(--fail)}}.stat[data-tone="new"]{{border-top-color:var(--new)}}ol.hsteps{{list-style:none;margin:0;padding:0;counter-reset:hs;display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:1rem;min-width:0}}ol.hsteps li{{counter-increment:hs;display:flex;flex-direction:column;gap:.25rem;border-top:2px solid var(--accent);padding-top:.55rem;min-width:0}}ol.hsteps li::before{{content:counter(hs);font:600 .78rem/1 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent)}}ol.hsteps b{{font-size:.93rem}}ol.hsteps span{{font-size:.86rem;line-height:1.7;color:var(--ink-2)}}.chip-groups{{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.9rem 1.4rem;min-width:0}}.chip-group{{display:flex;flex-direction:column;gap:.45rem;min-width:0}}.chip-head{{margin:0;font-size:.88rem;display:flex;align-items:baseline;gap:.45rem;flex-wrap:wrap}}.chip-head .cnt{{font:600 .8rem/1 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent)}}.cnt-note{{font-size:.76rem;font-weight:400;color:var(--ink-3)}}ul.chips{{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.35rem}}ul.chips li{{font-size:.8rem;line-height:1.5;padding:.12rem .55rem;border:1px solid var(--rule);border-radius:999px;background:var(--surface);color:var(--ink-2)}}
+.pin{{display:inline-grid;place-items:center;min-width:1.35rem;height:1.35rem;padding:0 .3rem;border-radius:999px;background:var(--accent);color:var(--on-accent);font:700 .72rem/1 "IBM Plex Mono",ui-monospace,monospace;vertical-align:.08em;margin-right:.35rem}}.pin[data-tone="good"]{{background:var(--pass)}}.pin[data-tone="warn"]{{background:var(--warn)}}.pin[data-tone="bad"]{{background:var(--fail)}}.pin[data-tone="new"]{{background:var(--new)}}.pin[data-tone="acc"]{{background:var(--accent)}}.of{{color:var(--ink-3)}}td.stackcell{{min-width:7.5rem}}td.stackcell .v{{display:block;font-variant-numeric:tabular-nums}}.stack{{display:flex;gap:2px;height:.5rem;width:7.5rem;max-width:100%;margin-top:.3rem;border-radius:2px;overflow:hidden;background:var(--surface-2)}}.stack i{{display:block;height:100%;min-width:3px}}.stack i[data-tone="good"],.stack-legend i[data-tone="good"]{{background:var(--pass)}}.stack i[data-tone="warn"],.stack-legend i[data-tone="warn"]{{background:var(--warn)}}.stack i[data-tone="bad"],.stack-legend i[data-tone="bad"]{{background:var(--fail)}}.stack i[data-tone="new"],.stack-legend i[data-tone="new"]{{background:var(--new)}}.stack i[data-tone="acc"],.stack-legend i[data-tone="acc"]{{background:var(--accent)}}.stack-legend{{display:flex;flex-wrap:wrap;gap:.3rem 1rem;font-size:.8rem;color:var(--ink-2);margin:.1rem 0 .45rem}}.stack-legend span{{display:inline-flex;align-items:center;gap:.35rem}}.stack-legend i{{display:inline-block;width:.7rem;height:.7rem;border-radius:2px}}.cell-note{{display:block;margin-top:.15rem;font-family:inherit;font-size:.76rem;line-height:1.55;color:var(--ink-3);white-space:normal;text-align:left}}td.num .cell-note{{font-family:"Zen Kaku Gothic New",system-ui,sans-serif}}tr.grp td,tr.grp th{{border-top:2px solid var(--rule)}}tbody th[scope="row"]{{font-weight:700;color:var(--ink);background:transparent}}tbody th[scope="row"]{{min-width:6.5rem}}@media(max-width:600px){{td.stackcell{{min-width:5.6rem}}.stack{{width:5.6rem}}}}.img-pin{{position:absolute;transform:translate(-50%,-50%);display:inline-grid;place-items:center;min-width:1.5rem;height:1.5rem;padding:0 .3rem;border-radius:999px;font:700 .76rem/1 "IBM Plex Mono",ui-monospace,monospace;background:var(--accent);color:var(--on-accent);box-shadow:0 0 0 2px var(--surface);pointer-events:none}}.img-pin[data-tone="good"]{{background:var(--pass)}}.img-pin[data-tone="warn"]{{background:var(--warn)}}.img-pin[data-tone="bad"]{{background:var(--fail)}}.img-pin[data-style="box"]{{transform:translate(-35%,-35%);background:var(--surface);color:var(--fail);border:1.5px solid var(--fail);box-shadow:none}}.img-pin[data-style="box"][data-tone="good"]{{color:var(--pass);border-color:var(--pass)}}.img-pin[data-style="box"][data-tone="warn"]{{color:var(--warn);border-color:var(--warn)}}.img-pin[data-style="box"][data-tone="acc"]{{color:var(--accent);border-color:var(--accent)}}.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(11.5rem,1fr));gap:.7rem;min-width:0}}.stat{{background:var(--surface);border:1px solid var(--rule);border-top:3px solid var(--accent);border-radius:2px;padding:.9rem 1rem;display:flex;flex-direction:column;gap:.25rem;min-width:0}}.stat-num{{font:500 2rem/1.15 "IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--ink);overflow-wrap:anywhere}}.stat-num small{{font:500 .85rem/1 "Zen Kaku Gothic New",system-ui,sans-serif;color:var(--ink-2);margin-left:.35rem}}.stat-label{{font-weight:700;font-size:.9rem}}.stat-sub{{margin:0;font-size:.83rem;line-height:1.7;color:var(--ink-2)}}.stat[data-tone="good"]{{border-top-color:var(--pass)}}.stat[data-tone="warn"]{{border-top-color:var(--warn)}}.stat[data-tone="bad"]{{border-top-color:var(--fail)}}.stat[data-tone="new"]{{border-top-color:var(--new)}}ol.hsteps{{list-style:none;margin:0;padding:0;counter-reset:hs;display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:1rem;min-width:0}}ol.hsteps li{{counter-increment:hs;display:flex;flex-direction:column;gap:.25rem;border-top:2px solid var(--accent);padding-top:.55rem;min-width:0}}ol.hsteps li::before{{content:counter(hs);font:600 .78rem/1 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent)}}ol.hsteps b{{font-size:.93rem}}ol.hsteps span{{font-size:.86rem;line-height:1.7;color:var(--ink-2)}}.chip-groups{{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:.9rem 1.4rem;min-width:0}}.chip-group{{display:flex;flex-direction:column;gap:.45rem;min-width:0}}.chip-head{{margin:0;font-size:.88rem;display:flex;align-items:baseline;gap:.45rem;flex-wrap:wrap}}.chip-head .cnt{{font:600 .8rem/1 "IBM Plex Mono",ui-monospace,monospace;color:var(--accent)}}.cnt-note{{font-size:.76rem;font-weight:400;color:var(--ink-3)}}ul.chips{{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.35rem}}ul.chips li{{font-size:.8rem;line-height:1.5;padding:.12rem .55rem;border:1px solid var(--rule);border-radius:999px;background:var(--surface);color:var(--ink-2)}}
 .callout-legend{{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.45rem}}.callout-item{{display:flex;align-items:center;gap:.55rem}}.callout-legend svg.badge{{width:1.4rem;height:1.4rem;padding:0;border:0;background:none;display:inline-block;vertical-align:middle;flex:none}}.callout-text{{font-size:.88rem;color:var(--ink-2)}}
 .compare{{border:1px solid var(--rule);border-radius:2px;padding:1rem;background:var(--surface);min-width:0}}.compare-tabs label{{min-height:32px;display:inline-flex;align-items:center}}
 .pros-cons{{display:block;margin-top:.3rem;font-size:.85rem;line-height:1.7;color:var(--ink-2)}}.pros-cons b{{font:600 .7rem/1.6 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.04em;margin-right:.3rem}}.pros-cons .pro{{color:var(--pass)}}.pros-cons .con{{color:var(--fail)}}
 .choice.has-thumb{{display:grid;grid-template-columns:auto minmax(0,1fr) min(12rem,38%)}}.choice .thumb{{display:block;grid-column:3;width:100%;min-width:0;margin:0;padding:.3rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface-2);line-height:0}}.choice .thumb img,.choice .thumb svg{{display:block;width:100%;height:auto}}.thumb-missing{{display:block;margin-top:.3rem;font-size:.78rem;line-height:1.6;color:var(--warn)}}.choice .thumb.thumb-missing{{grid-column:auto;width:auto;margin:.3rem 0 0;padding:0;border:0;background:transparent;line-height:1.6}}.choice .thumb .thumb-missing{{margin-top:.25rem}}@media(max-width:600px){{.choice.has-thumb{{grid-template-columns:auto minmax(0,1fr)}}.choice .thumb{{grid-column:2;max-width:16rem}}}}
 .q-note{{display:block;width:100%;margin:.4rem 0 0;padding:.45rem .6rem;border:1px solid var(--rule);border-radius:2px;background:var(--surface);color:var(--ink);font:inherit;font-size:.88rem}}
 .q-ref{{display:inline-block;margin-left:.6rem;padding:.05rem .55rem;border:1px solid var(--accent);border-radius:999px;background:var(--accent-soft);color:var(--accent);font:600 .72rem/1.6 "IBM Plex Mono",ui-monospace,monospace;letter-spacing:.03em;text-decoration:none;vertical-align:.2em;white-space:nowrap}}.q-ref:hover,.q-ref:focus-visible{{background:var(--accent);color:var(--on-accent)}}.q-no{{display:inline-block;margin-right:.45rem;padding:0 .4rem;border-radius:2px;background:var(--accent-soft);color:var(--accent);font-weight:700}}fieldset[id^="q-"]{{scroll-margin-top:1.2rem}}fieldset:target{{outline:2px solid var(--accent);outline-offset:6px;border-radius:2px}}
+{VIEW_CSS}
 @media print{{@page{{size:A4;margin:15mm}}#theme-toggle,.copy-btn,#copy-decision{{display:none !important}}.wrap[data-layout="rail"]{{display:block}}.wrap[data-layout="rail"]>.rail{{order:0;position:static;max-height:none;overflow:visible}}.card,.scroll,pre,.dia-wrap,.chart-wrap,details,.img-figure,.compare,.callout-legend{{break-inside:avoid;page-break-inside:avoid}}.t::after{{display:none !important}}.zoom-overlay,.dia-node-tip,.dia-hover-hint{{display:none !important}}}}{extra_css}
 </style>
 </head>
 <body>{body_html}
 <script>
 {DECISION_SCRIPT}
+</script>
+<script>
+{VIEW_SCRIPT}
 </script>{extra_scripts}</body></html>"""

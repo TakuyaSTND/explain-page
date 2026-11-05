@@ -52,7 +52,8 @@ CHIPS = (
     "ここは良い",
 )
 
-ROLE_ORDER = ("decision", "shiteki", "tensaku")
+# 2026-10-31：表示の script（render_components.VIEW_SCRIPT）が全頁共通の2本目＝判断欄の次。
+ROLE_ORDER = ("decision", "view", "shiteki", "tensaku")
 
 _MODES = ("none", "shiteki", "tensaku", "both")
 

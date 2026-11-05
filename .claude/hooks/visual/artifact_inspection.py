@@ -6,10 +6,10 @@ from html.parser import HTMLParser
 from typing import Mapping, Sequence
 
 from .glossary import GlossaryEntry
-from .render_components import DECISION_SCRIPT
+from .render_components import DECISION_SCRIPT, VIEW_SCRIPT
 from .term_boundary import contains_term, find_term
 
-# 2026-10-09（指摘と添削の作り込み）：頁に載せてよい script は3本＝判断欄・指摘・添削。
+# 2026-10-09（指摘と添削の作り込み）：頁に載せてよい script は3本＝判断欄・指摘・添削（2026-10-31 に表示の script を足して4本）。
 # 使う頁にだけ載る（部分集合）・各1本まで・判断欄が先頭で、あとは ROLE_ORDER の順。
 # ⚠️指摘・添削の script は別のモジュール（review_scripts）が正本。取り込めないとき（まだ無い・古い配布）は
 #   判断欄だけを認める＝今までと同じ動き。
@@ -23,6 +23,8 @@ APPROVED_SCRIPTS = tuple(
     pair
     for pair in (
         ("decision", DECISION_SCRIPT),
+        # 2026-10-31（利用者の思想・案V6・V7）：表示の切り替え・タブ・ⓘ・全部開く。全頁共通の2本目。
+        ("view", VIEW_SCRIPT),
         ("shiteki", SHITEKI_SCRIPT),
         ("tensaku", TENSAKU_SCRIPT),
     )
@@ -117,13 +119,19 @@ def _looks_like_identifier(value: str, known: set[str]) -> bool:
     )
 
 
-def _occurs_within(text: str, term: str, start: int, end: int) -> bool:
-    """term が text[start:end] の中に語として現れるか（境目の判定には外側の文字も使う）。"""
-    position = find_term(text, term, start)
+def _occurs_within(
+    text: str, term: str, start: int, end: int, cues: Sequence[str] | None = None
+) -> bool:
+    """term が text[start:end] の中に語として現れるか（境目と手がかりの判定には外側の文字も使う）。
+
+    cues＝用語集の規則表の手がかりの語（None は規則なし・() は自動では包まない・非空は手がかり付き）。
+    レンダラーと同じ `find_term` に渡すので、レンダラーが包まなかった語を、ここで責めない。
+    """
+    position = find_term(text, term, start, cues)
     while 0 <= position < end:
         if position + len(term) <= end:
             return True
-        position = find_term(text, term, position + 1)
+        position = find_term(text, term, position + 1, cues)
     return False
 
 
@@ -150,9 +158,15 @@ def _is_placeholder_source(value: str) -> bool:
 
 
 class _ArtifactParser(HTMLParser):
-    def __init__(self, known_identifiers: set[str]):
+    def __init__(
+        self,
+        known_identifiers: set[str],
+        cues: Mapping[str, tuple[str, ...]] | None = None,
+    ):
         super().__init__(convert_charrefs=True)
         self.known_identifiers = known_identifiers
+        # 用語集の規則表（2026-10-18）＝語→手がかりの語。規則のある語だけ（無い語は今までどおり）。
+        self.cues = dict(cues or {})
         self.stack: list[dict[str, object]] = []
         self.present_components: list[str] = []
         self.errors: list[str] = []
@@ -188,6 +202,9 @@ class _ArtifactParser(HTMLParser):
             self.present_components.append(name)
 
     def _record_known_identifiers(self, text: str, *, wrapped: bool) -> None:
+        # ⚠️ここは規則（手がかり）を通さない＝吹き出しの中の文字は、その語を包んだ証拠。手がかりは
+        #   吹き出しの外側の文字にあるので、通すと「初出は済んでいない」と数え、後ろの手がかり付きの
+        #   同じ語を未包装と責める（試作で1頁が落ちた＝pushdoc-fb）。
         for term in self.known_sorted:
             if not contains_term(text, term) or term in self.seen_identifiers:
                 continue
@@ -216,7 +233,7 @@ class _ArtifactParser(HTMLParser):
                 for term in self.known_sorted:
                     if term in self.seen_identifiers:
                         continue
-                    if _occurs_within(joined, term, offset, end):
+                    if _occurs_within(joined, term, offset, end, self.cues.get(term)):
                         self.seen_identifiers.add(term)
                         self.unwrapped_identifiers.append(term)
             offset = end
@@ -534,7 +551,13 @@ def inspect_artifact_html(
         for term in normalized_entries
         if _looks_like_identifier(term, set(normalized_entries))
     }
-    parser = _ArtifactParser(known_identifiers)
+    # 用語集の規則表の手がかりの語（2026-10-18）。レンダラーが包まなかった語を責めないために、同じ規則を読む。
+    rule_cues = {
+        term: entry.cues
+        for term, entry in normalized_entries.items()
+        if entry.cues is not None
+    }
+    parser = _ArtifactParser(known_identifiers, rule_cues)
     try:
         parser.feed(text)
         parser.close()

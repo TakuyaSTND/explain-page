@@ -56,10 +56,19 @@ class TableComponentTests(unittest.TestCase):
         self.assertIn("<th>項目</th>", html)
         self.assertIn("<th>レンダラー版</th>", html)
         self.assertIn('<caption>同じ検査器にかけた結果</caption>', html)
-        # 数値だけのセルは桁を揃える
-        self.assertIn('class="num">26144<', html)
+        # 2026-10-31：数と文字が混ざる列（合格・26144）は右寄せにしない＝同じ列で寄せ方が混ざらない
+        self.assertIn('data-label="レンダラー版">26144<', html)
         # 文字のセルには付けない
         self.assertIn('data-label="レンダラー版">合格<', html)
+
+    def test_numeric_column_is_right_aligned_only_when_every_cell_is_a_number(self):
+        html = render_components(
+            _plan("table"),
+            title="数",
+            content={"table": NL.join(["項目｜件数", "甲｜1,200", "乙｜35"])},
+        )
+        self.assertIn('class="num">1,200<', html)
+        self.assertIn('class="num">35<', html)
 
     def test_mapping_form_is_accepted(self):
         html = render_components(

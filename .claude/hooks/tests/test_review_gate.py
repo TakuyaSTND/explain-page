@@ -141,8 +141,9 @@ class RealReviewScriptsTests(unittest.TestCase):
             self.skipTest("review_scripts がまだ無い")
 
     def test_the_approved_list_has_three_distinct_roles_in_order(self):
-        self.assertEqual([role for role, _ in ai.APPROVED_SCRIPTS], ["decision", "shiteki", "tensaku"])
-        self.assertEqual(len({text for _role, text in ai.APPROVED_SCRIPTS}), 3)
+        # 2026-10-31：表示の script（view）が判断欄の次に入った＝4本。
+        self.assertEqual([role for role, _ in ai.APPROVED_SCRIPTS], ["decision", "view", "shiteki", "tensaku"])
+        self.assertEqual(len({text for _role, text in ai.APPROVED_SCRIPTS}), 4)
 
     def test_the_real_scripts_pass_in_every_subset(self):
         shiteki, tensaku = ai.SHITEKI_SCRIPT, ai.TENSAKU_SCRIPT

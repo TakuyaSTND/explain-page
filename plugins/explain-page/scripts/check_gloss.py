@@ -20,6 +20,7 @@
 正本＝.claude/html-output.md（基準）／.claude/glossary.md（言い回し）
 """
 import io
+import json
 import os
 import sys
 
@@ -72,6 +73,27 @@ def _rows(path):
         #   新語扱いになった）。
         out.append((norm(term), desc))
     return out
+
+
+def context_terms():
+    """規則表（固有の用語集の隣の glossary-context.json）に載っている語の集まり。無い・壊れているときは空。
+
+    2026-10-18：普通の言葉としても使う語（確定・予告・主体・論点など）は、本文に出ても自動では包まない
+    （または手がかりの語が近くにあるときだけ包む）。③の参考（包んでいない語）に混ぜると、書く側に
+    包む義務があるように読めるので外す。⚠️頁を落とす判定（①b・⓪・重複）は変えない。
+    """
+    path = os.path.join(os.path.dirname(GLOSS), 'glossary-context.json')
+    try:
+        with io.open(path, encoding='utf-8-sig') as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    return {
+        norm(str(key)) for key, value in data.items()
+        if not (str(key).startswith('_') and isinstance(value, str))
+    }
 
 
 def gloss_paths():
@@ -272,13 +294,16 @@ def main():
 
     body = strip_tags(without_manuscript(html))
     # ③参考＝用語集にあり本文に出ているが一度も包んでいない語。長い順に少しだけ。
-    unwrapped = [t for t in g if len(t) >= 3 and t in body and t not in seen]
+    ruled = context_terms()
+    unwrapped = [t for t in g if len(t) >= 3 and t in body and t not in seen and t not in ruled]
     unwrapped.sort(key=len, reverse=True)
 
     print('=' * 72)
     print('用語ホバーの点検: %s' % os.path.basename(p))
     print('  用語集 %d語（共通 %d ＋ 固有 %d）／ この頁で包んだ語 %d件'
           % (len(g), COUNTS.get('共通', 0), COUNTS.get('固有', 0), len(seen)))
+    if ruled:
+        print('  規則表 %d語（普通の言葉としても使う語＝③の参考から外す）' % len(ruled))
     print('=' * 72)
 
     if OVERRIDE:

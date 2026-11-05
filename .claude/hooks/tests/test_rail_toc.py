@@ -108,7 +108,7 @@ class TocTests(unittest.TestCase):
 
     def test_no_extra_script_is_added(self):
         # ⚠️検査器は承認済みの1本以外の script を拒む。目次は素の錨だけで作る。
-        self.assertEqual(self.html.count("<script>"), 1)
+        self.assertEqual(self.html.count("<script>"), 2)  # 判断欄と表示の script（2026-10-31）の2本
 
 
 class WithoutTocTests(unittest.TestCase):

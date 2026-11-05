@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+try:
+    from .diagram_check import DIAGRAM_CHECK_JS
+except ImportError:  # 単体で読み込まれたとき（点検だけ外れる＝表示検査そのものは動く）
+    DIAGRAM_CHECK_JS = ""
+
 
 def _default_playwright_browsers_root() -> Path:
     """Playwrightのブラウザ本体の既定の置き場（2026-09-25・OSごとに分岐）。
@@ -88,10 +93,15 @@ NODE_SMOKE_SCRIPT = r"""
 const { pathToFileURL } = require('url');
 const playwrightPath = process.argv[1];
 const artifactPath = process.argv[2];
+// 2026-11-04（A3）：描き終えた箱と矢印の図の点検（visual/diagram_check.py の関数の式）。無ければ点検しない。
+const diagramCheckSrc = process.argv[3] || '';
 const artifactUrl = pathToFileURL(artifactPath).href;
 const { chromium } = require(playwrightPath);
 (async () => {
   const browser = await chromium.launch({headless:true});
+  // 2026-10-31：機械が混むと browser.close() だけで約23秒かかり（実測＝検査の本体は約6秒）、公開時の12秒を超えた。
+  //   結果を先に書き出し、閉じる待ちは1秒までにして抜ける（残ったブラウザは数秒で自分で終わった＝実測）。
+  const closeSoon = () => Promise.race([browser.close().catch(() => {}), new Promise(resolve => setTimeout(resolve, 1000))]);
   const errors = [];
   const metrics = {viewports:{}, externalRequests:0};
   const viewports = [[1280,900],[390,844]];
@@ -117,12 +127,22 @@ const { chromium } = require(playwrightPath);
       await page.goto(artifactUrl, {waitUntil:'load', timeout:8000});
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
       if (overflow) pageErrors.push('horizontal-overflow');
+      // 2026-11-04（A3・利用者の回答 Q3 A＝警告だけ）：図の座標は画面幅に依らないので、広い画面で1回だけ測る。
+      //   結果は metrics に入れるだけ＝errors（合否）には入れない。点検が落ちても表示検査は続ける。
+      if (width >= 1000 && diagramCheckSrc) {
+        try {
+          metrics.diagramChecks = await page.evaluate('(' + diagramCheckSrc + ')()');
+        } catch (error) {
+          metrics.diagramChecks = [{fig: 0, title: '', kind: 'check-failed', text: String(error).slice(0, 60)}];
+        }
+      }
 
-      const tooltipCount = await page.locator('.t').count();
+      // 2026-10-31：根拠・用語は初めは畳む（案V4）・タブは1つずつ見せる（案V7）＝見えている吹き出しで試す。
+      const tooltipCount = await page.locator('.t:visible').count();
       let hoverVisible = null;
       let focusVisible = null;
       if (tooltipCount) {
-        const tooltip = page.locator('.t').first();
+        const tooltip = page.locator('.t:visible').first();
         await tooltip.hover();
         hoverVisible = await tooltip.evaluate(el => getComputedStyle(el,'::after').display !== 'none');
         await tooltip.focus();
@@ -137,6 +157,9 @@ const { chromium } = require(playwrightPath);
             document.querySelectorAll('.t').forEach((el, i) => {
               const rects = [...el.getClientRects()];
               if (!rects.length) return;
+              // 2026-10-31：閉じた折りたたみ（details）の中の語は矩形があっても触れない＝1語ごとに1.5秒待って失敗し、
+              //   公開時の検査が12秒を超えた（実測＝6語中4語）。見えない語は吹き出しも開かないので選ばない。
+              if (typeof el.checkVisibility === 'function' && !el.checkVisibility({checkVisibilityCSS: true})) return;
               out.push({i: i, edge: Math.max(...rects.map(r => r.right))});
             });
             out.sort((a, b) => b.edge - a.edge);
@@ -239,7 +262,10 @@ const { chromium } = require(playwrightPath);
         }
         return {low, min: Math.round(min * 100) / 100};
       });
+      // 2026-10-31（利用者の思想・案V3）：頁の高さ（縦に伸びすぎを、画面の何枚分かで知らせる）。
+      const pageHeight = await page.evaluate(() => document.documentElement.scrollHeight);
       metrics.viewports[key] = {
+        pageHeight,
         lowContrast: contrast.low,
         minContrast: contrast.min,
         overflow,
@@ -255,13 +281,15 @@ const { chromium } = require(playwrightPath);
       errors.push(...pageErrors.map(error => `${key}:${error}`));
       await page.close();
     }
-  } finally {
-    await browser.close();
+  } catch (error) {
+    await closeSoon();
+    throw error;
   }
-  console.log(JSON.stringify({status:errors.length ? 'fail' : 'pass', errors, metrics}));
+  const line = JSON.stringify({status:errors.length ? 'fail' : 'pass', errors, metrics});
+  process.stdout.write(line + String.fromCharCode(10), () => { closeSoon().then(() => process.exit(0)); });
 })().catch(error => {
-  console.log(JSON.stringify({status:'fail',errors:[`browser-smoke:${String(error).slice(0,180)}`],metrics:{}}));
-  process.exitCode = 1;
+  const line = JSON.stringify({status:'fail',errors:[`browser-smoke:${String(error).slice(0,180)}`],metrics:{}});
+  process.stdout.write(line + String.fromCharCode(10), () => process.exit(1));
 });
 """
 
@@ -351,6 +379,8 @@ def run_visual_smoke(
         return VisualSmokeResult("not_run", (resolution_error or "Playwright unavailable",), {})
 
     command = ["node", "-e", NODE_SMOKE_SCRIPT, playwright_path, str(artifact)]
+    if DIAGRAM_CHECK_JS:
+        command.append(DIAGRAM_CHECK_JS)
     try:
         completed = _run_node(command, timeout_seconds=max(1, int(timeout_seconds)))
     except subprocess.TimeoutExpired:

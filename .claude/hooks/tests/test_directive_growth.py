@@ -23,7 +23,7 @@ if str(HOOKS_DIR) not in sys.path:
 
 from visual import branding  # noqa: E402
 from visual.contracts import ExplanationPlan  # noqa: E402
-from visual.instructions import PREFLIGHT_LINE, compile_directive  # noqa: E402
+from visual.instructions import FIGURE_KEYS_TEXT, PAGE_PHILOSOPHY_LINE, PREFLIGHT_LINE, compile_directive  # noqa: E402
 
 ALL_COMPONENTS = (
     "overview", "summary", "walkthrough", "examples", "progress",
@@ -37,6 +37,14 @@ BASELINE_DECISION_PAGE = 2405    # 頁を作る回・reasons に decision_requir
 BASELINE_PLAIN_PAGE = 2410       # 頁を作る回・decision_required なし
 BASELINE_MARKDOWN = 1084         # 頁を作らない回
 GROWTH_LIMIT_DECISION = 150
+# 2026-10-31：利用者の指示で足した見せ方の思想の行（頁を作る回だけ・約270字）は別枠＝
+#   上限の150字は、それ以外の増分を見張る。思想の行そのものの長さは下の試験で固定する。
+PHILOSOPHY_ALLOWANCE = len(PAGE_PHILOSOPHY_LINE)
+# 2026-11-05：利用者が報告の頁の Q1 で「足す」を選んだ図の鍵4つの文（105字）も別枠＝150字の見張りは、それ以外の増分に効いたまま。
+FIGURE_KEYS_ALLOWANCE = len(FIGURE_KEYS_TEXT)
+FIGURE_KEYS_MAX = 110
+# 2026-10-31：利用者の指示「スクショは基本的にホバーに移して」の1文（約40字）を足したので 300→330。
+PHILOSOPHY_MAX = 330
 
 
 def _fragment_file(directory):
@@ -77,14 +85,21 @@ class GrowthTests(_FixedBranding):
     def test_decision_page_turn_grows_by_at_most_the_limit(self):
         length = len(self.directive(_plan(reasons=("decision_required",))))
 
-        growth = length - BASELINE_DECISION_PAGE
+        growth = length - BASELINE_DECISION_PAGE - PHILOSOPHY_ALLOWANCE - FIGURE_KEYS_ALLOWANCE
         self.assertGreater(growth, 0)
         self.assertLessEqual(growth, GROWTH_LIMIT_DECISION, "増分=%d字" % growth)
+
+    def test_figure_keys_text_is_short_and_listed(self):
+        # 別枠にした図の鍵の文そのものの長さを固定する（足すときは利用者に増える字数を見せてから）。
+        self.assertLessEqual(len(FIGURE_KEYS_TEXT), FIGURE_KEYS_MAX)
+        directive = self.directive(_plan())
+        for key in ("`mermaid`", "`fishbone`", "`waterfall`", "`dumbbell`"):
+            self.assertIn(key, directive)
 
     def test_plain_page_turn_grows_less_than_the_decision_turn(self):
         length = len(self.directive(_plan()))
 
-        growth = length - BASELINE_PLAIN_PAGE
+        growth = length - BASELINE_PLAIN_PAGE - PHILOSOPHY_ALLOWANCE - FIGURE_KEYS_ALLOWANCE
         self.assertGreater(growth, 0)
         self.assertLess(growth, GROWTH_LIMIT_DECISION - len(PREFLIGHT_LINE))
 
@@ -93,6 +108,22 @@ class GrowthTests(_FixedBranding):
         length = len(self.directive(_plan("markdown", ("decision_required",))))
 
         self.assertEqual(length, BASELINE_MARKDOWN)
+
+
+class PhilosophyLineTests(_FixedBranding):
+    """2026-10-31：見せ方の思想の行＝頁を作る回だけ・先頭・長さの上限。"""
+
+    def test_page_turns_start_with_the_line_and_markdown_turns_do_not_have_it(self):
+        for plan in (_plan(), _plan(reasons=("decision_required",))):
+            directive = self.directive(plan)
+            self.assertEqual(directive.count(PAGE_PHILOSOPHY_LINE), 1)
+            self.assertLess(directive.index("見せ方の思想"), directive.index("頁は手書きしない"))
+        self.assertNotIn("見せ方の思想", self.directive(_plan("markdown", ("decision_required",))))
+
+    def test_the_line_stays_short(self):
+        self.assertLessEqual(len(PAGE_PHILOSOPHY_LINE), PHILOSOPHY_MAX)
+        for needle in ("key", "[[info:", "tabs", "情報量は削らない"):
+            self.assertIn(needle, PAGE_PHILOSOPHY_LINE)
 
 
 class PreflightLineTests(_FixedBranding):

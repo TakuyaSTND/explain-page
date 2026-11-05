@@ -74,7 +74,8 @@ class NodeSyntaxTests(unittest.TestCase):
     def test_role_scripts_map_matches_the_constants(self):
         self.assertIs(rs.ROLE_SCRIPTS["shiteki"], rs.SHITEKI_SCRIPT)
         self.assertIs(rs.ROLE_SCRIPTS["tensaku"], rs.TENSAKU_SCRIPT)
-        self.assertEqual(rs.ROLE_ORDER, ("decision", "shiteki", "tensaku"))
+        # 2026-10-31：表示の script（view）が判断欄の次に入った。
+        self.assertEqual(rs.ROLE_ORDER, ("decision", "view", "shiteki", "tensaku"))
 
 
 class ForbiddenStringTests(unittest.TestCase):

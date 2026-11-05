@@ -29,7 +29,7 @@ from visual import blocks
 from visual import render_components as rc
 from visual.blocks import UNIT_RULES, BlockInfo, number_blocks
 from visual.contracts import ExplanationPlan
-from visual.render_components import DECISION_SCRIPT, render_components
+from visual.render_components import DECISION_SCRIPT, VIEW_SCRIPT, render_components
 
 try:
     from visual import review_scripts as real_review_scripts
@@ -91,6 +91,7 @@ def _walk(html: str) -> list[dict]:
 # 規則ごとの最小の見本（種類 → 数えられる HTML 断片と、その要素が持つ data-blk の数）。
 SNIPPETS = {
     "card": '<div class="card-stack"><div class="card"><h3>見出し</h3><p>本文</p></div></div>',
+    "proposal": '<div class="props"><article class="prop" data-recommended="0"><header class="prop-head"><h4 class="prop-title">案</h4></header><p>主張</p></article></div>',
     "tile": '<div class="tiles"><div class="tile"><b>題</b><span>説明</span></div></div>',
     "stat": '<div class="stats"><div class="stat"><div class="stat-num">38</div></div></div>',
     "note": '<div class="note warn"><h3>注意</h3><p>ここは大事</p></div>',
@@ -497,7 +498,7 @@ class WiringTests(unittest.TestCase):
     def test_without_review_the_page_is_what_it_was(self):
         html = _render()
 
-        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip()])
+        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip()])
         self.assertNotIn("data-blk", html)
         self.assertNotIn("rv-shiteki", html)
         self.assertNotIn("data-review-mode", html)
@@ -512,7 +513,7 @@ class WiringTests(unittest.TestCase):
     def test_shiteki_adds_one_script_after_the_decision_script_one_css_and_numbers(self):
         html = _render(review="shiteki")
 
-        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), "window.__shiteki = 1;"])
+        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip(), "window.__shiteki = 1;"])
         self.assertEqual(html.count("<style>"), 1)
         style = html[html.index("<style>") : html.index("</style>")]
         self.assertIn(".rv-shiteki{color:var(--ink)}", style)
@@ -524,13 +525,13 @@ class WiringTests(unittest.TestCase):
     def test_both_puts_shiteki_then_tensaku_after_the_decision_script(self):
         html = _render(review="both")
 
-        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), "window.__shiteki = 1;", "window.__tensaku = 1;"])
+        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip(), "window.__shiteki = 1;", "window.__tensaku = 1;"])
         style = html[html.index("<style>") : html.index("</style>")]
         self.assertLess(style.index(".rv-shiteki"), style.index(".rv-tensaku"))
 
     def test_review_can_be_written_as_a_mapping_and_in_other_cases(self):
-        self.assertEqual(_scripts(_render(review={"mode": "tensaku"})), [DECISION_SCRIPT.strip(), "window.__tensaku = 1;"])
-        self.assertEqual(_scripts(_render(review="BOTH"))[1:], ["window.__shiteki = 1;", "window.__tensaku = 1;"])
+        self.assertEqual(_scripts(_render(review={"mode": "tensaku"})), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip(), "window.__tensaku = 1;"])
+        self.assertEqual(_scripts(_render(review="BOTH"))[2:], ["window.__shiteki = 1;", "window.__tensaku = 1;"])
 
     def test_the_scripts_are_laid_out_like_the_decision_script(self):
         html = _render(review="both")
@@ -549,7 +550,7 @@ class WiringTests(unittest.TestCase):
         rc._review_scripts = None
         html = _render(review="both")
 
-        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip()])
+        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip()])
         self.assertNotIn("data-blk", html)
 
     def test_a_broken_review_module_does_not_break_the_page(self):
@@ -558,7 +559,7 @@ class WiringTests(unittest.TestCase):
 
         rc._review_scripts = _fake_review(normalize_mode=boom)
 
-        self.assertEqual(_scripts(_render(review="both")), [DECISION_SCRIPT.strip()])
+        self.assertEqual(_scripts(_render(review="both")), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip()])
 
 
 MANUSCRIPT = {
@@ -589,7 +590,7 @@ class ManuscriptSectionTests(unittest.TestCase):
     def test_manuscript_section_has_its_mode_and_loads_its_role_even_when_review_is_none(self):
         html = _render(sections=_manuscript_sections())
 
-        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), "window.__tensaku = 1;"])
+        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip(), "window.__tensaku = 1;"])
         self.assertIn('<section data-component="manuscript" id="sec-1" data-review-mode="tensaku"><h2>原稿</h2>', html)
         self.assertEqual(html.count("data-review-mode="), 1)
         style = html[html.index("<style>") : html.index("</style>")]
@@ -603,7 +604,7 @@ class ManuscriptSectionTests(unittest.TestCase):
         walked = _walk(html)
         self.assertTrue(all("ms-blk" in w["classes"] for w in walked), [w["classes"] for w in walked])
         self.assertEqual([w["blk"] for w in walked], [1, 2, 3])
-        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), "window.__shiteki = 1;", "window.__tensaku = 1;"])
+        self.assertEqual(_scripts(html), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip(), "window.__shiteki = 1;", "window.__tensaku = 1;"])
 
     def test_the_manuscript_text_and_the_source_textarea_are_in_the_section(self):
         html = _render(sections=_manuscript_sections())
@@ -627,7 +628,7 @@ class ManuscriptSectionTests(unittest.TestCase):
         self.assertIn('data-review-mode="shiteki"', _render(review="both", sections=_manuscript_sections(bad_mode)))
         self.assertEqual(
             _scripts(_render(sections=_manuscript_sections(shiteki))),
-            [DECISION_SCRIPT.strip(), "window.__shiteki = 1;"],
+            [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip(), "window.__shiteki = 1;"],
         )
 
     def test_manuscript_without_the_markdown_module_falls_back_to_an_escaped_pre(self):
@@ -673,13 +674,13 @@ class RealReviewScriptsTests(unittest.TestCase):
             html = _render(review=review)
             self.assertEqual(
                 _scripts(html),
-                [DECISION_SCRIPT.strip()] + [getattr(real_review_scripts, name).strip() for name in roles],
+                [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip()] + [getattr(real_review_scripts, name).strip() for name in roles],
                 review,
             )
             self.assertEqual(html.count("<style>"), 1)
 
     def test_none_stays_a_single_script_page(self):
-        self.assertEqual(_scripts(_render()), [DECISION_SCRIPT.strip()])
+        self.assertEqual(_scripts(_render()), [DECISION_SCRIPT.strip(), VIEW_SCRIPT.strip()])
 
 
 if __name__ == "__main__":

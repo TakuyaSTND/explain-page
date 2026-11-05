@@ -9,7 +9,7 @@ from typing import Any
 
 from .adapters import from_claude, from_codex, from_hermes
 from .artifact_inspection import inspect_artifact_html
-from .composer import COMPONENT_ORDER, compose_plan
+from .composer import COMPONENT_ORDER, compose_plan, structure_weight
 from .contracts import HookEnvelope
 from .glossary import load_glossary_snapshot
 from . import branding
@@ -588,6 +588,61 @@ def handle_event(
                 since=started - 2.0,
             ):
                 sheet_only_turn = True
+    # 2026-10-15（利用者の選択＝案9(b) の A）：**変換だけの回は差し戻さない**。
+    # 依頼に速さの合図と変換の語の両方があった回（依頼時の計画の reason に conversion_only_request＝
+    # composer.conversion_signals）で、応答がその変換の短い報告で終わった回。
+    # 免除する条件は全部そろったときだけ（1つでも欠ければ従来どおり差し戻す＝fail-closed）：
+    #   ・依頼時の計画があり、その reason に conversion_only_request がある
+    #   ・頁が要る回で、この回に道具を使い、検品証が1件も無い（頁を出した回は、その頁が通る必要がある）
+    #   ・回の開始時刻が分かり、それより後に置き場の外へ書いて見送られた頁が無い
+    #   ・応答が短い（min_chars 未満）・構造が重くない（min_blocks 未満）
+    #   ・確定した計画に decision が無い（応答に判断の合図があれば頁を求める）
+    # ⚠️計画（2026-10-14）は「応答の実態に図の合図が無い」も条件にしていたが、外した（2026-10-15）。
+    #   変換の報告は出来上がりを説明するので「図と文字が崩れていない」のように図の合図が自然に入り、
+    #   承認済みの置き場のパスにも visual の文字が入る。過去の会話で免除の対象になり得た2回は、
+    #   どちらもこの条件だけで免除されなかった（実測＝10/10〜14 の依頼文 65 件の再生）。
+    # 欠けた条件は conversion_gaps に1行ずつ集め、差し戻すときに理由として添える（2026-09-01 の裁定
+    #   「差し戻すときは理由を1行添える」＝要求は緩めず、説明を足すだけ）。
+    conversion_only_turn = False
+    conversion_gaps: list[str] = []
+    if (
+        not sheet_only_turn
+        and saved_plan is not None
+        and "conversion_only_request" in tuple(saved_plan.reason_codes)
+        and plan.delivery == "local_html"
+        and envelope.turn_has_tool_use
+    ):
+        if receipts:
+            conversion_gaps.append("この回に頁を出した＝その頁が検品に通る必要がある")
+        if len(envelope.response_text) >= policy.min_chars:
+            conversion_gaps.append(
+                "応答が%d字（%d字未満なら免除）" % (len(envelope.response_text), policy.min_chars)
+            )
+        weight = structure_weight(envelope.response_text)
+        if weight >= policy.min_blocks:
+            conversion_gaps.append(
+                "応答の見出し・箇条・表の行が%d個（%d個未満なら免除）" % (weight, policy.min_blocks)
+            )
+        if "decision" in plan.components:
+            conversion_gaps.append("応答に判断の合図がある")
+        if state_store is None:
+            conversion_gaps.append("記録の置き場が無い")
+        else:
+            started = state_store.load_plan_created_at(
+                runtime=runtime,
+                project_hash=project_key,
+                session_id=envelope.session_id,
+                turn_id=envelope.turn_id,
+            )
+            if started is None:
+                conversion_gaps.append("回の始まりの時刻が分からない")
+            elif state_store.load_receipt_skips(
+                project_hash=project_key,
+                session_id=envelope.session_id,
+                since=started - 2.0,
+            ):
+                conversion_gaps.append("承認済みの置き場の外へ頁を書いた")
+        conversion_only_turn = not conversion_gaps
     # 2026-09-08：読みやすさ関門（否定側の言い回し）。response_textは長い転写の末尾から
     #   組み立てられるため、古い・別ターンの断片が残っている可能性がある（既知の課題）。
     #   ⚠️shadowはここでblockを新設しない（数えて知らせるだけ）＝enforceだけが下の早期
@@ -601,6 +656,7 @@ def handle_event(
         plan.delivery != "local_html"
         or receipt_is_valid
         or sheet_only_turn
+        or conversion_only_turn
         # 2026-08-28（ユーザー委任＝claims/claude-code-hook-noop-20260828.md）：
         # **作業の実体が無いターンは検品証を要求しない**＝通知への応答・現状維持の確認のような、
         # ターン内に tool_use が1つも無い応答にまで頁の再公開を強いない。
@@ -620,6 +676,12 @@ def handle_event(
             return {
                 "systemMessage": "[sheet_only_turn] 回答集めのシートだけの回＝差し戻さない（%s）"
                 % _sheet_names(sheets_found)
+            }
+        if conversion_only_turn and runtime != "hermes":
+            # シートの免除と同じく、差し戻さないが沈黙にもしない（Hermes は何も返さない）。
+            return {
+                "systemMessage": "[conversion_only_turn] 変換だけの回＝差し戻さない"
+                "（依頼に速さの合図と変換の語・検品証0・応答%d字）" % len(envelope.response_text)
             }
         return {}
     if state_store is not None and not state_store.claim_response(
@@ -691,6 +753,13 @@ def handle_event(
             "（頁を公開していない、または承認済みの置き場の外に書いた）。"
             "回答集めのシートだけの回なら、シートを承認済みの置き場の下"
             "（akapen は " + _sheet_home(local_artifact_root) + "）に書けば差し戻されない。"
+        )
+    if conversion_gaps:
+        # 2026-10-15（案9(b)）：変換だけの依頼の印があるのに免除しなかった理由を1行で添える。
+        reason += chr(10) + (
+            "[conversion_not_exempt] 依頼は変換だけ（速さの合図と変換の語）の印つきだが免除しない："
+            + "／".join(conversion_gaps)
+            + "。変換だけの回は、頁を作らずに短く報告すれば差し戻さない。"
         )
     if readability_hits:
         # すでにblockするこのターンに、読みやすさの当たりを併記する（shadow/enforceどちらでも

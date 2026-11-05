@@ -55,6 +55,25 @@ DELIVERY_LINES = {
 }
 DELIVERY_FALLBACK = "Local-only。用語検査と表示検査を通す。"
 
+# 2026-10-31（利用者の指示「全部これらの僕の思想をちゃんと重要な部分に書き留めておいて」）：
+#   見せ方の思想（認知負荷を下げる二重構造）を、頁を作る回の指示文の先頭に置く（行の前のほうが効く＝2026-09-01 実測）。
+#   ⚠️毎回の頁の回に約270字増える＝試験（test_directive_growth）はこの行を別枠で数える。
+PAGE_PHILOSOPHY_LINE = (
+    "【見せ方の思想＝認知負荷を下げる二重構造】本質は図と強調で一目に、詳細は文章で全部読める。"
+    "組む前に、上に置く結論・畳む物・各カードの中心メッセージを決める。カードは `key`（中心メッセージ1行）＋`text`（詳細・削らない）。"
+    "強調はとにかく使う＝結論は `**太字**`・但し書きは `==ハイライト==`・数は `[[num:…]]`・リスクは `[[risk:…]]`・本質でない補足は `[[info:…]]`（ⓘ）。"
+    "縦に伸ばさない＝同じ形の塊は `tabs`、短いカードは横に並ぶ、根拠と用語は自動で畳まれる。情報量は削らない。"
+    "画面写真は本文に並べず `hover_images` と `[[pic:鍵:語]]` でホバーに。"
+)
+
+# 2026-11-05（利用者の選択＝報告の頁「図の7案の実装報告」の Q1「足す」）：A6・A4 で足した図の鍵を部品の一覧に載せる。
+#   ⚠️毎回の頁の回に105字増える（利用者は増えると知って選んだ）＝試験（test_directive_growth）はこの文を別枠で数える。
+FIGURE_KEYS_TEXT = (
+    "／`mermaid`（Mermaid の文字＝流れ図・状態・やりとりの図）／`fishbone`（魚の骨＝原因の分類）"
+    "／`waterfall`（滝の図＝足し引きの内訳）／`dumbbell`（いま→施策後の差）"
+)
+
+
 # 2026-08-31（実害）：レンダラーの使い方が CLAUDE.md にしか書かれておらず、
 #   規約を足す**前に始まったセッション**には永久に届かなかった（CLAUDE.md はセッション
 #   開始時に1回だけ読まれる）。そこでは頁が手書きになり、目印が無いので検品証が必ず落ちる。
@@ -76,7 +95,8 @@ def _renderer_line(render_page_path: str | None = None) -> str:
         "（部品の目印が無い＝それでよい。シートだけの回は差し戻さない）。"
     ) if qa_tool else ""
     return (
-    "頁は手書きしない＝`" + tool + "` に定義JSONを渡して組む"
+    PAGE_PHILOSOPHY_LINE
+    + "頁は手書きしない＝`" + tool + "` に定義JSONを渡して組む"
     "（手書きは検品証が落ちる）。" + exception + "報告と判断の頁は必ずレンダラーで作る。"
     "頁の頭を結論の1文にするなら `headline`（題は短いまま）。配置＝段組みは `columns`、タイルは `tiles`、"
     "頁全体の2段組みは `rail`（`toc` で節の目次、`glossary` で頁の用語リスト）。"
@@ -88,6 +108,7 @@ def _renderer_line(render_page_path: str | None = None) -> str:
     "／`svg`（手書きのSVGを許可リストで組み直して載せる）／`image`（画面の写真・スクショ・スライドを貼る＝`path`（PNG・JPEG・WebP）か `deck`+`slide`、`crop` で切り出し、`marks` の `style`:`pin` で点の番号）／`screenshot`（手元の頁や localhost を組むときに撮って貼る＝`target`・`viewport`・`selector`）"
     "／`timeline`（時間軸）／`quadrant`（四象限）／`venn`（集合の重なり）／`flow`（重み付きの流れ）／`score`（採点の格子）"
     "／`compare`（前後の切り替え）／`callouts`（番号付き吹き出しの凡例）／`diagram_text`（1行記法 `A -> B : 条件` から図）"
+    + FIGURE_KEYS_TEXT +
     "／`table` の `heat`・`bars`（列の色付けと行内の棒）・`stack`（「62,3,0」を内訳の積み上げ棒に）・`frac`（分母を薄く）・`groups`（行の区切り）・`row_head`、セルの改行の後は小さい注記／`stats`（大きい数字）／`steps`（横並びの手順）／`chips`（短い語の札）／`diagram` の箱に `icon`（線画の記号）、"
     "文中は `[[good:…]]` の色札・`[[pin:3]]`（画像の点の番号と同じ印）・`==強調==`・`**太字**`・`` `コード` ``。"
     "判断は `groups`（radio／checkbox／scale／number／free）で組み、選択肢に `pros`・`cons`（非推奨にも利点）と `thumb`（svg か画像の path）を添える。"

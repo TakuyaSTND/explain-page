@@ -28,6 +28,10 @@ RESOURCE_ATTRIBUTE = re.compile(
 CSS_URL = re.compile(r"url\s*\(\s*([^)]*?)\s*\)", re.I)
 CSS_IMPORT = re.compile(r"@import\b", re.I)
 NETWORK_CODE = re.compile(r"\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\s*\(?", re.I)
+# 2026-10-31（C班の報告）：埋めた画像（data:image/png;base64,…）の文字列に偶然「/fetch」のような綴りが出て、
+# 通信のコードと誤判定した（大城の審査結果の頁。画像の寸法を変えて通していた）。画像の中身は通信も実行もしないので、
+# 属性の値からは種類だけ残して中身を外す。SVG（data:image/svg+xml）は script を持てるので外さない。
+RASTER_DATA_URI = re.compile(r"(data:image/(?:png|jpe?g|gif|webp|avif|bmp);base64,)[A-Za-z0-9+/=]+", re.I)
 SECRET_VALUE = re.compile(
     r"(?i)\b(token|api[_-]?key|password|passwd|secret)\s*[:=]\s*[^\s,;]+"
 )
@@ -148,6 +152,7 @@ class _MarkupOnly(HTMLParser):
                 or "url(" in lowered
                 or "javascript:" in lowered
             ):
+                text = RASTER_DATA_URI.sub(r"\1", text)
                 kept.append('%s="%s"' % (name, text.replace('"', "'")))
         return "<%s %s>" % (tag, " ".join(kept)) if kept else "<%s>" % tag
 

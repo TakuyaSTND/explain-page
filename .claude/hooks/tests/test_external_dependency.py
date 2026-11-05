@@ -137,6 +137,18 @@ class ActiveCodeIsStillBlockedTests(unittest.TestCase):
         self.assertIsNone(external_dependency_reason('<img src="data:image/png;base64,AA==">'))
         self.assertIsNone(external_dependency_reason('<svg><rect fill="url(#g)"></rect></svg>'))
 
+    def test_fetch_spelling_inside_an_embedded_image_passes(self):
+        # 2026-10-31（C班の報告）：画像の base64 に偶然「/fetch」「+WebSocket」が出ても通信のコードではない
+        for value in ("data:image/png;base64,AAAA/fetchAA==", "data:image/jpeg;base64,fetch+WebSocket0="):
+            with self.subTest(value=value):
+                self.assertIsNone(external_dependency_reason('<img src="%s">' % value))
+                self.assertIsNone(external_dependency_reason('<div style="background:url(%s)"></div>' % value))
+
+    def test_svg_data_uri_and_script_are_still_checked(self):
+        # SVG は script を持てるので中身を外さない・script の中の data: の文字列も外さない
+        self.assertIsNotNone(external_dependency_reason('<img src="data:image/svg+xml;base64,AA/fetchAA==">'))
+        self.assertIsNotNone(external_dependency_reason("<script>const u='data:image/png;base64,AA';fetch(u)</script>"))
+
     def test_external_url_in_prose_is_still_blocked(self):
         # 外部のURLは従来どおり全文で止める（今回の直しの範囲外＝緩めない）
         self.assertIsNotNone(external_dependency_reason("<p>https://example.com を見る</p>"))

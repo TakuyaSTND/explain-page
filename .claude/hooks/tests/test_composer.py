@@ -12,7 +12,7 @@ if str(HOOKS_DIR) not in sys.path:
 
 from visual import branding
 from visual.policy import load_policy, parse_controls
-from visual.composer import compose_plan, structure_weight
+from visual.composer import compose_plan, conversion_signals, structure_weight
 from visual.contracts import HookEnvelope
 from visual.entrypoint import build_preflight_context
 
@@ -369,6 +369,90 @@ class ExplanationPolicyTests(unittest.TestCase):
             html_output_path=Path(__file__).resolve().parents[2] / "html-output.md",
         )
         self.assertIn("explicit_always", always_context)
+
+
+class ConversionOnlyRequestTests(unittest.TestCase):
+    """2026-10-15（利用者の選択＝案9(b) の A）：速さの合図と変換の語の**両方**がある依頼だけに
+    conversion_only_request の印を付ける。合図だけ・変換の語だけ・LaTeX 指定・頁を作る依頼には付けない。
+    """
+
+    def _plan(self, message, *, event="UserPromptSubmit", response=""):
+        envelope = HookEnvelope(
+            schema_version=1,
+            runtime="claude",
+            runtime_version="",
+            event=event,
+            project_root="C:/repo",
+            profile_id="",
+            session_id="session",
+            turn_id="turn",
+            invocation_id="",
+            user_message=message,
+            response_text=response,
+            response_sha256="",
+            transcript_path="",
+            changed_paths=(),
+            stop_hook_active=False,
+            attempt=0,
+            capabilities=frozenset({"can_context"} if event == "UserPromptSubmit" else {"can_continue"}),
+            valid_for_state=True,
+        )
+        return compose_plan(envelope, load_policy(path=None, env={branding.ENV_MODE: "always"}))
+
+    def test_quick_conversion_requests_are_marked(self):
+        # 上の4つは 10/10〜14 の会話で実際に印が付いた依頼の形（免除の候補の実例）。
+        for message in (
+            "PDFにして　早く",
+            "PDF化して　そのままでいい　早く",
+            "このアーティファクトをPDFにして　爆速で",
+            "とりあえず現状のものだけでいいから　とりあえずPDFに書き出して（仮）であることを明示して",
+            "ＰＤＦ化して はやく",
+            "とりあえずdocxにして",
+            "ドキュメント化して　とりあえず",
+            "この頁を印刷して、仮でいい",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(conversion_signals(message))
+                self.assertIn("conversion_only_request", self._plan(message).reason_codes)
+
+    def test_other_requests_are_not_marked(self):
+        for message in (
+            "PDF 出力の作業のコミットして",
+            "頁を作ってPDFにして早く",
+            "もっと視覚的にわかりやすい　アーティファクト＆PDFにしてよ",
+            "LaTeXでPDF化して",
+            "これらのFBをLaTeXを使って、わかりやすくかつ詳細にPDF化して",
+            "とりあえず既存のワークフローを確認して",
+            "仮説の節をPDFにして",
+            "3案を図で比較してPDFにして早く",
+            "どれを採用するか決めてからPDFにして早く",
+            "要約してPDFにして早く",
+            "PDFにして早く" + "。" * 120,
+            "",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(conversion_signals(message), ())
+                self.assertNotIn("conversion_only_request", self._plan(message).reason_codes)
+
+    def test_the_matched_signals_are_returned(self):
+        self.assertEqual(conversion_signals("PDFにして　早く"), ("早く", "pdfにして"))
+
+    def test_the_mark_changes_nothing_else_in_the_plan(self):
+        marked = self._plan("PDFにして　早く")
+        plain = self._plan("PDFにして")
+
+        self.assertEqual(marked.components, plain.components)
+        self.assertEqual(marked.delivery, plain.delivery)
+        self.assertEqual(marked.publish_policy, plain.publish_policy)
+        self.assertEqual(
+            [code for code in marked.reason_codes if code != "conversion_only_request"],
+            list(plain.reason_codes),
+        )
+
+    def test_the_reply_alone_never_marks_a_turn(self):
+        plan = self._plan("", event="Stop", response="PDFにして　早く")
+
+        self.assertNotIn("conversion_only_request", plan.reason_codes)
 
 
 if __name__ == "__main__":

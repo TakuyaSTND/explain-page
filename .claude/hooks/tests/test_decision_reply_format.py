@@ -37,7 +37,7 @@ if str(HOOKS_DIR) not in sys.path:
 from visual import visual_smoke
 from visual.artifact_inspection import inspect_artifact_html
 from visual.contracts import ExplanationPlan
-from visual.render_components import DECISION_SCRIPT, render_components
+from visual.render_components import DECISION_SCRIPT, VIEW_SCRIPT, render_components
 
 SEEN_REC = "(見たうえで推奨のまま)"
 UNSEEN_REC = "(見ていない＝推奨で進めるが、大事なら会話で確かめる)"
@@ -125,10 +125,13 @@ class ScriptTextTests(unittest.TestCase):
     def test_script_is_embedded_once_and_unchanged(self):
         html = _page()
 
-        self.assertEqual(html.count("<script>"), 1)
+        # 2026-10-31：表示の script（VIEW_SCRIPT）が2本目に入る。判断欄の script は先頭の1本のまま。
+        self.assertEqual(html.count("<script>"), 2)
         start = html.index("<script>") + len("<script>")
         end = html.index("</script>")
         self.assertEqual(html[start:end].strip(), DECISION_SCRIPT.strip())
+        start2 = html.index("<script>", end) + len("<script>")
+        self.assertEqual(html[start2:html.index("</script>", start2)].strip(), VIEW_SCRIPT.strip())
 
     def test_script_stays_the_only_approved_script_for_the_gate(self):
         inspection = inspect_artifact_html(
@@ -294,6 +297,9 @@ def _run_in_browser(html: str, steps: list[dict], height: int = 900) -> dict:
 def _pushed_down(html: str) -> str:
     """判断の節を下へ 3000px 押し下げる＝読み込み直後は問いが1つも表示域に入らない。"""
     marker = '<section data-component="decision"'
+    # 2026-10-31：広い画面では選択肢が2列に並ぶ（判断欄の縦を縮める）。この試験は「見た」の判定を
+    #   問いの高さで確かめるので、試験の頁だけ選択肢を従来の1列に戻して、問いの配置を固定する。
+    html = html.replace("</head>", "<style>fieldset{display:block!important}</style></head>", 1)
     return html.replace(marker, '<div style="height:3000px"></div>' + marker, 1)
 
 

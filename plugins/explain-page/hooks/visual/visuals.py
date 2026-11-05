@@ -38,6 +38,12 @@ import math
 from html import escape as _html_escape
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+try:
+    from .diagram_layout import KINSOKU_HEAD, KINSOKU_TAIL
+except ImportError:  # 単体で読み込まれたとき（禁則の字の一覧は diagram_layout.py が正本）
+    KINSOKU_HEAD = frozenset("、。，．・：；？！）］｝」』】〕〉》’”,.:;?!)]}")
+    KINSOKU_TAIL = frozenset("（［｛「『【〔〈《‘“([{")
+
 __all__ = [
     "timeline_svg",
     "quadrant_svg",
@@ -131,9 +137,16 @@ def _wrap(text: str, max_width: float, font_px: float, max_lines: int = 3) -> Li
     for ch in text:
         w = _char_w(ch, font_px)
         if cur and cur_w + w > max_width:
+            # 2026-11-04（A1・利用者の回答 Q2 A）：禁則＝次の行の頭が「、」などか、今の行の末尾が開き括弧なら、
+            #   今の行の最後の1字を次の行へ送る（追い出し）。送っても直らないときは送らない。
+            carry = ""
+            if (ch in KINSOKU_HEAD or cur[-1] in KINSOKU_TAIL) and len(cur) > 1 \
+                    and cur[-1] not in KINSOKU_HEAD and cur[-2] not in KINSOKU_TAIL:
+                carry = cur[-1]
+                cur = cur[:-1]
             lines.append(cur)
-            cur = ch
-            cur_w = w
+            cur = carry + ch
+            cur_w = sum(_char_w(c, font_px) for c in cur)
         else:
             cur += ch
             cur_w += w

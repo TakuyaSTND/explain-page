@@ -93,6 +93,10 @@ LAYERED_MAX_BOX_W = 260.0
 # 2026-09-12（担当H3・撮影で確認＝折り返した段への辺が別の箱の裏を通る）：
 # 経路が箱を突っ切っていないかの安全網の検査で、箱の矩形に足す余白。
 BOX_SAFETY_PAD = 4.0
+# 2026-11-04（A2）：両側がふさがった箱の迂回で、段の上下の隙間を通る横線を段から離す量。
+ROW_ESCAPE = 12.0
+# 2026-11-04（A2・利用者の回答 Q5 A）：同じ箱の同じ点に出入りする線の端を、この間隔でずらす。
+PORT_SPREAD = 12.0
 # 2026-09-12（担当H4・リードの実測＝迂回する辺が箱の上下中央から出入りし、
 # 順方向の辺と出入口を共有して短い区間で重なる／層間の隙間を横に2回横切る）：
 # 迂回する辺が同じ縦線（side_x）を複数本通るときに、外側へこの幅ずつずらして
@@ -252,41 +256,65 @@ def _wrap(text: str, max_chars: int) -> list[str]:
     """改行は尊重し、それぞれの行を max_chars 文字で機械的に折る。切れは出さない。
 
     英数の連なり（単語）は、単語自体が limit を超えない限り途中で割らない。
+    2026-11-04（A1）：禁則つき＝行の頭に「、」などを置かない（`_fill_lines`）。
     """
     lines: list[str] = []
     limit = max(1, int(max_chars))
     for seg in _stringify(text).split(chr(10)):
         if seg == "":
             continue
-        cur = ""
+        pieces: list[str] = []
         for tok in _tokenize_for_wrap(seg):
-            if cur == "":
-                if len(tok) <= limit:
-                    cur = tok
-                else:
-                    # 1語が上限を超える＝やむを得ず字で折る
-                    for start in range(0, len(tok), limit):
-                        piece = tok[start:start + limit]
-                        if start + limit >= len(tok):
-                            cur = piece
-                        else:
-                            lines.append(piece)
-                continue
-            if len(cur) + len(tok) <= limit:
-                cur += tok
+            if len(tok) <= limit:
+                pieces.append(tok)
             else:
-                lines.append(cur)
-                if len(tok) <= limit:
-                    cur = tok
-                else:
-                    for start in range(0, len(tok), limit):
-                        piece = tok[start:start + limit]
-                        if start + limit >= len(tok):
-                            cur = piece
-                        else:
-                            lines.append(piece)
-        if cur != "":
-            lines.append(cur)
+                # 1語が上限を超える＝やむを得ず字で折る
+                pieces.extend(tok[start:start + limit] for start in range(0, len(tok), limit))
+        lines.extend(_fill_lines(pieces, lambda s: len(s) <= limit))
+    return lines
+
+
+# 2026-11-04（A1・利用者の回答＝赤ペン diagram-skills-impl-01 の Q1 A・Q3 A）：禁則。
+#   行の頭に置かない字＝句読点・中黒・閉じ括弧（全角と半角）。行の末尾に置かない字＝開き括弧。
+#   直し方は追い出し＝前の行の最後の1語を次の行へ送る（箱の幅は変えない・行が1つ増えることがある）。
+#   小さい仮名（っゃゅょ）と長音（ー）は対象外（Q3 A）。
+#   実測（2026-11-04）＝既存の図165個中61個・2,399行中98行で、行の頭に「、」「・」「）」などが来ていた。
+KINSOKU_HEAD = frozenset("、。，．・：；？！）］｝」』】〕〉》’”,.:;?!)]}")
+KINSOKU_TAIL = frozenset("（［｛「『【〔〈《‘“([{")
+
+
+def _fill_lines(pieces: Sequence[str], fits) -> list[str]:
+    """語（pieces）を `fits(行)` が真の間だけ前から詰めて行にする。禁則つき。
+
+    行を切る所で、次の行の頭が KINSOKU_HEAD の字か、今の行の末尾が KINSOKU_TAIL の字なら、
+    今の行の最後の語を次の行へ送る（追い出し）。送った語でまた同じ形になれば、もう1語送る。
+    今の行が1語しか残らないときや、何語送っても直らないとき（「、、、」の連なりなど）は送らない
+    （崩れは残るが行は必ず進む）。
+    """
+    queue = list(pieces)
+    lines: list[str] = []
+    cur: list[str] = []
+    i = 0
+
+    def bad(line_tail: str, next_head: str) -> bool:
+        return next_head[:1] in KINSOKU_HEAD or line_tail[-1:] in KINSOKU_TAIL
+
+    while i < len(queue):
+        tok = queue[i]
+        if not cur or fits("".join(cur) + tok):
+            cur.append(tok)
+            i += 1
+            continue
+        if bad(cur[-1], tok):
+            for k in range(1, len(cur)):
+                if not bad(cur[-k - 1], cur[-k]):
+                    del cur[-k:]
+                    i -= k
+                    break
+        lines.append("".join(cur))
+        cur = []
+    if cur:
+        lines.append("".join(cur))
     return lines
 
 
@@ -306,25 +334,15 @@ def _wrap_to_width(text: str, max_px: float, px_per_em: float) -> list[str]:
     for seg in _stringify(text).split(chr(10)):
         if seg == "":
             continue
-        cur = ""
+        pieces: list[str] = []
         for tok in _tokenize_for_wrap(seg):
-            if width_of(cur + tok) <= budget:
-                cur += tok
-                continue
-            if cur:
-                lines.append(cur)
-                cur = ""
             if width_of(tok) <= budget:
-                cur = tok
-                continue
-            # 1語が幅を超える＝やむを得ず字で割る
-            for ch in tok:
-                if cur and width_of(cur + ch) > budget:
-                    lines.append(cur)
-                    cur = ""
-                cur += ch
-        if cur:
-            lines.append(cur)
+                pieces.append(tok)
+            else:
+                # 1語が幅を超える＝やむを得ず字で割る
+                pieces.extend(tok)
+        # 2026-11-04（A1）：禁則つき（`_fill_lines`）。
+        lines.extend(_fill_lines(pieces, lambda s: width_of(s) <= budget))
     return lines
 
 
@@ -1213,7 +1231,13 @@ def _outer_perimeter_route(
     source_port_offset: float = 0.0,
     target_port_offset: float = 0.0,
 ) -> list[tuple[float, float]]:
-    """箱群の外周を回り、同じ段の兄弟箱を横切らない折れ線を作る。"""
+    """箱群の外周を回り、同じ段の兄弟箱を横切らない折れ線を作る。
+
+    2026-11-04（A2・撮影で確認＝就労の資料の審査結果の図）：左右の両側に同じ段の箱がある箱は、
+    横から出入りすると隣の箱の裏を通った（M2 から左へ出る線が M1 の裏を、L2b へ左から入る線が
+    L2a の裏を通り、矢印が隣の箱へ入るように見えた）。∴両側がふさがった箱は、段の下の隙間へ
+    下りて出る・段の上の隙間から下りて入る（ROW_ESCAPE だけ段から離した横線を通る）。
+    """
     source_side = _free_horizontal_side(source, boxes)
     target_side = _free_horizontal_side(target, boxes)
     source_limit = max(0.0, float(source["h"]) / 2.0 - 8.0)
@@ -1226,28 +1250,59 @@ def _outer_perimeter_route(
     target_edge_x = target["x"] if target_side == "left" else target["x"] + target["w"]
     source_lane_x = left_x if source_side == "left" else right_x
     target_lane_x = left_x if target_side == "left" else right_x
+    # 出口：横がふさがっていれば、段の下の隙間へ下りてから外側へ。
+    if _side_blocked(source, boxes, source_side):
+        cx = source["x"] + source["w"] / 2.0
+        out_y = _row_span(source, boxes)[1] + ROW_ESCAPE
+        head = [(cx, source["y"] + source["h"]), (cx, out_y), (source_lane_x, out_y)]
+    else:
+        head = [(source_edge_x, source_y), (source_lane_x, source_y)]
+    # 入口：横がふさがっていれば、段の上の隙間から箱の上辺へ下りる。
+    if _side_blocked(target, boxes, target_side):
+        cx = target["x"] + target["w"] / 2.0
+        in_y = _row_span(target, boxes)[0] - ROW_ESCAPE
+        tail = [(target_lane_x, in_y), (cx, in_y), (cx, target["y"])]
+    else:
+        tail = [(target_lane_x, target_y), (target_edge_x, target_y)]
     if source_lane_x == target_lane_x:
         # 同じ外側を使えるときは下端まで往復しない。盤面の外側をそのまま縦に進む。
-        points = [
-            (source_edge_x, source_y),
-            (source_lane_x, source_y),
-            (target_lane_x, target_y),
-            (target_edge_x, target_y),
-        ]
+        points = head + tail
     else:
-        points = [
-            (source_edge_x, source_y),
-            (source_lane_x, source_y),
-            (source_lane_x, bottom_y),
-            (target_lane_x, bottom_y),
-            (target_lane_x, target_y),
-            (target_edge_x, target_y),
-        ]
+        points = head + [(source_lane_x, bottom_y), (target_lane_x, bottom_y)] + tail
     compact: list[tuple[float, float]] = []
     for point in points:
         if not compact or point != compact[-1]:
             compact.append(point)
     return compact
+
+
+def _same_row(box: Mapping[str, object], boxes: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """縦の範囲が重なる（＝同じ段の）ほかの箱。"""
+    top = float(box["y"])
+    bottom = top + float(box["h"])
+    return [
+        other
+        for other in boxes
+        if other is not box
+        and min(bottom, float(other["y"]) + float(other["h"])) > max(top, float(other["y"]))
+    ]
+
+
+def _side_blocked(box: Mapping[str, object], boxes: Sequence[Mapping[str, object]], side: str) -> bool:
+    """箱の左（right なら右）に、同じ段の箱があるか（2026-11-04・A2）。"""
+    row = _same_row(box, boxes)
+    if side == "left":
+        return any(float(other["x"]) < float(box["x"]) for other in row)
+    return any(float(other["x"]) > float(box["x"]) for other in row)
+
+
+def _row_span(box: Mapping[str, object], boxes: Sequence[Mapping[str, object]]) -> tuple[float, float]:
+    """箱の段の上端と下端（同じ段の箱を全部含める）。"""
+    members = [box] + _same_row(box, boxes)
+    return (
+        min(float(m["y"]) for m in members),
+        max(float(m["y"]) + float(m["h"]) for m in members),
+    )
 
 
 def _perimeter_port_offset(order: int, height: float) -> float:
@@ -1315,6 +1370,222 @@ def _safe_label_anchor(
     return initial
 
 
+# ---------------------------------------------------------------------------
+# 2026-11-04（A2・利用者の回答＝赤ペン diagram-skills-impl-01 の Q4 A・Q5 A）：経路を組み終えた後の後処理
+# ---------------------------------------------------------------------------
+#
+# 実測（2026-11-04）＝既存の図165個の見積もりで、別の線が通るラベル19本・ラベル同士の重なり4組・
+# 同じ縦線・横線の上で8px超重なる直線15組（12図）。撮影した審査結果の図で、同じ箱の同じ点に
+# 入る矢印が重なり、どの「漏れ」がどの矢印のラベルか読めなかった。
+# ①同じ箱の同じ点に出入りする線の端を PORT_SPREAD ずつずらす（Q5 A）。
+# ②ラベルが箱・他の線・他のラベルに重なるときだけ、自分の線に沿った候補へ移す。どこへ動かしても
+#   重なるなら、いちばん重なりの少ない所に置く（Q4 A＝残りは描いた後の点検 diagram_check.py が警告）。
+
+
+def _route_samples(route: Route, step: float = 4.0) -> list[tuple[float, float]]:
+    """経路を描く形（直線・折れ線・二次・三次の曲線）に沿った点の列。"""
+    pts = list(route.points)
+    if len(pts) < 2:
+        return pts
+    control = route.control
+    if control is not None:
+        p0, p3 = pts[0], pts[-1]
+        if isinstance(control[0], tuple):
+            c1, c2 = control
+        else:
+            cx, cy = control
+            c1 = (p0[0] + (cx - p0[0]) * 2.0 / 3.0, p0[1] + (cy - p0[1]) * 2.0 / 3.0)
+            c2 = (p3[0] + (cx - p3[0]) * 2.0 / 3.0, p3[1] + (cy - p3[1]) * 2.0 / 3.0)
+        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in ((p0, c1), (c1, c2), (c2, p3)))
+        return _bezier_sample(p0, c1, c2, p3, max(8, int(length / step)))
+    out: list[tuple[float, float]] = []
+    for a, b in zip(pts, pts[1:]):
+        n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / step))
+        out.extend((a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(n))
+    out.append(pts[-1])
+    return out
+
+
+def _endpoint_side(point: tuple[float, float], box: Mapping[str, object], tol: float = 1.5) -> str:
+    """線の端が箱のどの辺の上にあるか（top・bottom・left・right、どれでもなければ空）。"""
+    x, y = point
+    bx, by, bw, bh = (float(box[key]) for key in ("x", "y", "w", "h"))  # type: ignore[arg-type]
+    if bx - tol <= x <= bx + bw + tol:
+        if abs(y - by) <= tol:
+            return "top"
+        if abs(y - (by + bh)) <= tol:
+            return "bottom"
+    if by - tol <= y <= by + bh + tol:
+        if abs(x - bx) <= tol:
+            return "left"
+        if abs(x - (bx + bw)) <= tol:
+            return "right"
+    return ""
+
+
+def _moved_end(route: Route, at_start: bool, dx: float, dy: float) -> tuple[list[tuple[float, float]], Optional[tuple]]:
+    """線の端を (dx, dy) だけ動かした点の列と制御点。折れ線は、端の隣の点も同じ軸で動かして直角を保つ。"""
+    pts = list(route.points)
+    i = 0 if at_start else len(pts) - 1
+    j = 1 if at_start else len(pts) - 2
+    x, y = pts[i]
+    control = route.control
+    if control is not None:
+        if isinstance(control[0], tuple):
+            c1, c2 = control
+            if at_start:
+                c1 = (c1[0] + dx, c1[1] + dy)
+            else:
+                c2 = (c2[0] + dx, c2[1] + dy)
+            control = (c1, c2)
+    elif len(pts) >= 3:
+        nx, ny = pts[j]
+        if dx and abs(nx - x) < 0.5:
+            pts[j] = (nx + dx, ny)
+        if dy and abs(ny - y) < 0.5:
+            pts[j] = (nx, ny + dy)
+    pts[i] = (x + dx, y + dy)
+    return pts, control
+
+
+def _spread_shared_ports(routes: list[Route], boxes: Sequence[Mapping[str, object]]) -> None:
+    """同じ箱の同じ点に出入りする線の端を、辺に沿って PORT_SPREAD ずつずらす（その場で書き換える）。
+
+    並べる順は、線のもう一方の端の位置（上下の辺なら x・左右の辺なら y）＝ずらした線どうしが交わりにくい。
+    ずらすと別の箱を横切る線は、ずらさない。
+    """
+    groups: dict[tuple[int, str, int, int], list[tuple[int, bool]]] = {}
+    for ri, route in enumerate(routes):
+        if len(route.points) < 2:
+            continue
+        for at_start, bi in ((True, route.from_index), (False, route.to_index)):
+            if not 0 <= bi < len(boxes):
+                continue
+            point = route.points[0] if at_start else route.points[-1]
+            side = _endpoint_side(point, boxes[bi])
+            if side:
+                groups.setdefault((bi, side, round(point[0]), round(point[1])), []).append((ri, at_start))
+    for (bi, side, _x, _y), members in groups.items():
+        if len(members) < 2:
+            continue
+        box = boxes[bi]
+        horizontal = side in ("top", "bottom")
+
+        def far_coord(member: tuple[int, bool]) -> float:
+            route = routes[member[0]]
+            far = route.points[-1] if member[1] else route.points[0]
+            return far[0] if horizontal else far[1]
+
+        members.sort(key=lambda m: (far_coord(m), m[0]))
+        n = len(members)
+        room = (float(box["w"]) if horizontal else float(box["h"])) - 16.0  # type: ignore[arg-type]
+        step = min(PORT_SPREAD, room / (n - 1)) if room > 0 else 0.0
+        for k, (ri, at_start) in enumerate(members):
+            offset = (k - (n - 1) / 2.0) * step
+            if abs(offset) < 0.01:
+                continue
+            dx, dy = (offset, 0.0) if horizontal else (0.0, offset)
+            route = routes[ri]
+            pts, control = _moved_end(route, at_start, dx, dy)
+            if _route_hits_other_box(pts, control, boxes, route.from_index, route.to_index):
+                continue
+            route.points = pts
+            route.control = control
+            if route.label:
+                # 線が動いたので、ラベルも新しい線の脇へ置き直す（重なりは次の _place_labels_clear が見る）。
+                route.label_x, route.label_y = _label_anchor_layered(pts, control)
+
+
+def _label_rect(x: float, y: float, label: str) -> tuple[float, float, float, float]:
+    """辺のラベル（12px）の見積もりの矩形＝`_label_rect_hits_box` と同じ幅の見積もり。"""
+    width = max(20.0, sum(8.0 if ch.isascii() else 13.0 for ch in label))
+    return (x - width / 2.0, y - 8.0, x + width / 2.0, y + 8.0)
+
+
+def _rects_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
+
+
+def _points_inside(rect: tuple[float, float, float, float], pts: Sequence[tuple[float, float]], pad: float = 1.0) -> bool:
+    return any(rect[0] + pad < x < rect[2] - pad and rect[1] + pad < y < rect[3] - pad for x, y in pts)
+
+
+def _place_labels_clear(routes: list[Route], boxes: Sequence[Mapping[str, object]]) -> None:
+    """ラベルが箱・他の線・他のラベルに重なるときだけ、自分の線に沿った候補へ移す（その場で書き換える）。
+
+    今の位置がどれにも重ならなければ動かさない（既存の図の見た目を無用に変えない）。候補は線の上の
+    9か所から、線と垂直な向きにラベルの半分の幅（高さ）＋4px 離した点（自分の線にも重ならない）。
+    重なりの数が最も少なく、元の位置に近い候補を選ぶ。どこも今より良くなければ動かさない。
+    """
+    samples = [_route_samples(route) for route in routes]
+    box_rects = [
+        (float(b["x"]) - 2.0, float(b["y"]) - 2.0, float(b["x"]) + float(b["w"]) + 2.0, float(b["y"]) + float(b["h"]) + 2.0)  # type: ignore[arg-type]
+        for b in boxes
+    ]
+    placed = {i: _label_rect(r.label_x, r.label_y, r.label) for i, r in enumerate(routes) if r.label}
+    # 図の今の広がり（箱と線）。ラベルをこの外へ出すと図が広がる（実測＝長いラベルが左の外へ移り、
+    # 幅が674→895pxになった）＝外へ出た長さに比例して重く罰する（横は1pxあたり10・縦は2）。
+    xs = [float(b["x"]) for b in boxes] + [float(b["x"]) + float(b["w"]) for b in boxes]  # type: ignore[arg-type]
+    ys = [float(b["y"]) for b in boxes] + [float(b["y"]) + float(b["h"]) for b in boxes]  # type: ignore[arg-type]
+    for pts in samples:
+        xs.extend(p[0] for p in pts)
+        ys.extend(p[1] for p in pts)
+    lo_x, hi_x = (min(xs), max(xs)) if xs else (0.0, 0.0)
+    lo_y, hi_y = (min(ys), max(ys)) if ys else (0.0, 0.0)
+
+    def conflicts(i: int, rect: tuple[float, float, float, float]) -> float:
+        value = 0.0
+        if any(_rects_overlap(rect, box_rect) for box_rect in box_rects):
+            value += 1000.0
+        for j, pts in enumerate(samples):
+            if j != i and _points_inside(rect, pts):
+                value += 100.0
+        for j, other in placed.items():
+            if j != i and _rects_overlap(rect, other):
+                value += 100.0
+        return value
+
+    def cost(i: int, rect: tuple[float, float, float, float]) -> float:
+        value = 10.0 * (max(0.0, lo_x - rect[0]) + max(0.0, rect[2] - hi_x))
+        value += 2.0 * (max(0.0, lo_y - rect[1]) + max(0.0, rect[3] - hi_y))
+        return value + conflicts(i, rect)
+
+    for i, route in enumerate(routes):
+        if not route.label or len(samples[i]) < 2:
+            continue
+        # 動かすのは重なりがあるときだけ（図の外へはみ出しているだけのラベルは、今のまま）。
+        if conflicts(i, placed[i]) <= 0.0:
+            continue
+        here = cost(i, placed[i])
+        rect = placed[i]
+        half_w, half_h = (rect[2] - rect[0]) / 2.0, (rect[3] - rect[1]) / 2.0
+        best = (here, route.label_x, route.label_y)
+        pts = samples[i]
+        n = len(pts)
+        for frac in (0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88):
+            k = min(n - 2, max(0, int(frac * (n - 1))))
+            (ax, ay), (bx, by) = pts[k], pts[k + 1]
+            norm = math.hypot(bx - ax, by - ay) or 1.0
+            ux, uy = (by - ay) / norm, -(bx - ax) / norm
+            clear = abs(ux) * half_w + abs(uy) * half_h + 4.0
+            mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
+            for sign in (1.0, -1.0):
+                cx, cy = mx + ux * clear * sign, my + uy * clear * sign
+                value = cost(i, _label_rect(cx, cy, route.label)) + 0.02 * math.hypot(cx - route.label_x, cy - route.label_y)
+                if value < best[0]:
+                    best = (value, cx, cy)
+        if (best[1], best[2]) != (route.label_x, route.label_y):
+            route.label_x, route.label_y = best[1], best[2]
+            placed[i] = _label_rect(route.label_x, route.label_y, route.label)
+
+
+def _tidy_routes(routes: list[Route], boxes: Sequence[Mapping[str, object]]) -> list[Route]:
+    """経路を組み終えた後の後処理（A2）＝端をずらしてから、ラベルの置き場を直す。"""
+    _spread_shared_ports(routes, boxes)
+    _place_labels_clear(routes, boxes)
+    return routes
+
+
 def _build_routes(boxes: list[dict], edges: Sequence[dict]) -> list[Route]:
     if boxes:
         left_x = max(2.0, min(b["x"] for b in boxes) - MARGIN)
@@ -1369,7 +1640,7 @@ def _build_routes(boxes: list[dict], edges: Sequence[dict]) -> list[Route]:
                 control=control,
             )
         )
-    return routes
+    return _tidy_routes(routes, boxes)
 
 
 def _under_row_plan(
@@ -1538,7 +1809,7 @@ def _build_routes_layered(
                 control=control,
             )
         )
-    return routes
+    return _tidy_routes(routes, boxes)
 
 
 def _compute_bounds(

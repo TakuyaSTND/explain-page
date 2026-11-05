@@ -14,9 +14,25 @@
   【罠】2件 が包まれていなかった。∴英数字の判定は「語の端が英数字の側」だけに掛ける。
 ⚠️レンダラー（包む側）と検品器（包装を求める側）は**必ずこの関数を使う**＝規則がずれると、
   包まなかった語を検品器が「未包装」と責めて頁が落ちる。
+
+2026-10-18：同じ字で意味が違う語（確定・予告・主体・論点など）は、語の境目では止められない
+  （「判決確定後」の確定は、語として正しく見つかっている）。置き場の頁196本の吹き出し1,359件を
+  1件ずつ読むと、普通の用法が179件で、今の規則でも付くのは141件（86頁）だった。
+  ∴語ごとの「手がかりの語」（cues）を、用語集の隣の規則表（glossary-context.json）から受け取る。
+    None＝規則なし（今までどおり）／()＝自動では包まない（コード書きの丸ごと一致だけが包む）／
+    非空＝その語の前後 CUE_WINDOW 字に手がかりの語があるときだけ包む。
+⚠️吹き出しが付いた語（吹き出しの中の文字）を「初出は済んだ」と記録するときは、**規則を通さない**
+  （検品器の _record_known_identifiers）。通すと、手がかりが外側の文字にある語を「済んでいない」と
+  数え、後ろの手がかり付きの同じ語を未包装と責める（試作で1頁が落ちた＝pushdoc-fb）。
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
+
+# 手がかりの語を探す範囲＝その語の直前と直後の、それぞれ何字か（2026-10-18・利用者の裁定＝20字）。
+# 手がかりの語の全体が、この範囲に収まるときだけ手がかりとみなす。
+CUE_WINDOW = 20
 
 # 語ごとの「この語の中に現れても、この用語ではない」別の語。
 # ⚠️足すときは既存の頁で空振り（正しい包装を消していないか）を測ってから。
@@ -137,23 +153,44 @@ def _is_word_at(text: str, term: str, position: int) -> bool:
     return not _inside_other_word(text, term, position)
 
 
-def find_term(text: str, term: str, start: int = 0) -> int:
+def _cue_near(text: str, term: str, position: int, cues: Sequence[str]) -> bool:
+    """term（position から始まる）の前後 CUE_WINDOW 字に、手がかりの語があるか。
+
+    ⚠️手がかりの語の全体が、語の直前の CUE_WINDOW 字か直後の CUE_WINDOW 字に収まるときだけ。
+      語そのものは探す範囲に入れない（手がかりが語自身に当たって、いつも付く、を防ぐ）。
+    """
+    end = position + len(term)
+    before = text[max(0, position - CUE_WINDOW):position]
+    after = text[end:end + CUE_WINDOW]
+    return any(cue and (cue in before or cue in after) for cue in cues)
+
+
+def find_term(
+    text: str,
+    term: str,
+    start: int = 0,
+    cues: Sequence[str] | None = None,
+) -> int:
     """text の start 以降で、term が「語として」現れる最初の位置を返す（無ければ -1）。
 
-    入れるもの＝本文・用語集の語（表示の形）・探し始める位置。
-    ⚠️start より前の文字も境目の判定には使う（包んだ語の直後から探し直す時も、
+    入れるもの＝本文・用語集の語（表示の形）・探し始める位置・手がかりの語（cues）。
+    cues＝None は規則なし（今までどおり）、() は自動では見つけない（常に -1）、
+    非空は「その語の前後 CUE_WINDOW 字に手がかりの語があるときだけ」見つける。
+    ⚠️start より前の文字も境目と手がかりの判定には使う（包んだ語の直後から探し直す時も、
       直前の文字が見えるようにするため）。
     """
     if not term:
         return -1
     position = text.find(term, start)
     while position >= 0:
-        if _is_word_at(text, term, position):
+        if _is_word_at(text, term, position) and (
+            cues is None or _cue_near(text, term, position, cues)
+        ):
             return position
         position = text.find(term, position + 1)
     return -1
 
 
-def contains_term(text: str, term: str) -> bool:
-    """term が text の中に「語として」1回でも現れるか。"""
-    return find_term(text, term) >= 0
+def contains_term(text: str, term: str, cues: Sequence[str] | None = None) -> bool:
+    """term が text の中に「語として」1回でも現れるか（cues の意味は find_term と同じ）。"""
+    return find_term(text, term, 0, cues) >= 0

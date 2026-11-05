@@ -441,7 +441,7 @@ class GenericCopyButtonScriptTests(unittest.TestCase):
             ]},
         )
 
-        self.assertEqual(html.count("<script>"), 1)
+        self.assertEqual(html.count("<script>"), 2)  # 判断欄と表示の script（2026-10-31）の2本
         self.assertIn("data-copy", html)
         self.assertIn("querySelectorAll('[data-copy]')", html)
 

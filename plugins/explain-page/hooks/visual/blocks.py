@@ -48,6 +48,7 @@ class UnitRule:
 
 UNIT_RULES: tuple[UnitRule, ...] = (
     UnitRule("card", cls="card"),
+    UnitRule("proposal", cls="prop"),
     UnitRule("tile", cls="tile"),
     UnitRule("stat", cls="stat"),
     UnitRule("note", cls="note"),

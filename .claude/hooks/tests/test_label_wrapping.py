@@ -120,7 +120,7 @@ class TooltipStaysInsideThePageTests(unittest.TestCase):
         self.assertIn("data-flip", self.html)
 
     def test_no_extra_script_is_added(self):
-        self.assertEqual(self.html.count("<script>"), 1)
+        self.assertEqual(self.html.count("<script>"), 2)  # 判断欄と表示の script（2026-10-31）の2本
 
     def test_the_tooltip_is_hidden_until_touched(self):
         # 静止状態で場所を取ると、それだけで横溢れになる（2026-08-29に直した件）。

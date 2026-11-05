@@ -774,13 +774,13 @@ class ScriptsOnTheBuiltPageTests(_NeedsRenderer):
         _code, _out, files = self.build("# 題\n\n本文。\n", mode="shiteki")
         scripts = [s.strip() for s in self._scripts(files)]
 
-        self.assertEqual(scripts, [rc.DECISION_SCRIPT.strip(), review_scripts.SHITEKI_SCRIPT.strip()])
+        self.assertEqual(scripts, [rc.DECISION_SCRIPT.strip(), rc.VIEW_SCRIPT.strip(), review_scripts.SHITEKI_SCRIPT.strip()])
 
     def test_a_tensaku_page_carries_the_decision_and_tensaku_scripts_only(self):
         _code, _out, files = self.build("# 題\n\n本文。\n", mode="tensaku")
         scripts = [s.strip() for s in self._scripts(files)]
 
-        self.assertEqual(scripts, [rc.DECISION_SCRIPT.strip(), review_scripts.TENSAKU_SCRIPT.strip()])
+        self.assertEqual(scripts, [rc.DECISION_SCRIPT.strip(), rc.VIEW_SCRIPT.strip(), review_scripts.TENSAKU_SCRIPT.strip()])
         self.assertIn('data-review-mode="tensaku"', files["ms-page.html"].decode("utf-8"))
 
     def test_the_artifact_shape_keeps_the_same_scripts(self):
@@ -805,7 +805,7 @@ class ScriptsOnTheBuiltPageTests(_NeedsRenderer):
         self.assertIn(code, (0, 1), out)
         self.assertEqual(
             scripts,
-            [rc.DECISION_SCRIPT.strip(), review_scripts.SHITEKI_SCRIPT.strip(), review_scripts.TENSAKU_SCRIPT.strip()],
+            [rc.DECISION_SCRIPT.strip(), rc.VIEW_SCRIPT.strip(), review_scripts.SHITEKI_SCRIPT.strip(), review_scripts.TENSAKU_SCRIPT.strip()],
         )
 
 

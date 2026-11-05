@@ -57,6 +57,11 @@ class GlossarySnapshot:
     project_overrides: tuple[str, ...]
     same_file_duplicates: tuple[str, ...]
     mirror_matches_home: bool
+    # 2026-10-18：規則表（glossary-context.json）。無ければ既定の値のまま（既存の呼び出しを変えない）。
+    context_path: str = ""
+    context_sha256: str = ""
+    context_count: int = 0
+    context_problems: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

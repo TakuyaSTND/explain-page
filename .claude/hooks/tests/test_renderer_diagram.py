@@ -111,7 +111,8 @@ class DiagramShapeTests(unittest.TestCase):
         self.assertIn("pointerenter", self.html)
         self.assertIn("addEventListener('focus'", self.html)
         self.assertIn("addEventListener('click'", self.html)
-        self.assertIn("Tabキーで選ぶ", self.html)
+        # 2026-10-31（利用者の指摘「余計な説明要らない」）：図の上の案内の1行は出さない
+        self.assertNotIn('class="dia-hover-hint"', self.html)
 
     def test_node_detail_has_a_readable_accessible_fallback(self):
         self.assertIn(
