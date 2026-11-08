@@ -103,6 +103,23 @@ Codex は `<使いたいプロジェクトの根>/.codex/hooks.json` に書き�
 Codex には頁を公開する道具が無いので、Codex では頁を `render_page.py --runtime codex` で
 組んでください（道具が検品の記録を代わりに書きます）。
 
+## 共通の命令 page.py（どのエージェントからも同じ形で）
+
+`.claude/scripts/page.py` は、Claude Code・Codex・Hermes のどこからでも、端末から同じ形で打てる命令です。
+標準ライブラリだけで動き、結果は表で出し、成否を終了値（0＝成功・1＝失敗・2＝使い方の誤り）でも返します。
+
+```
+python .claude/scripts/page.py status                 # いまのリポジトリで頁の仕組みが効くか
+python .claude/scripts/page.py check 頁.html          # 頁の検査（表示検査は Playwright が要る）
+python .claude/scripts/page.py enable <リポジトリ>    # 有効にする印を置く（--write を付けるまで書かない）
+python .claude/scripts/page.py install --write        # 利用者単位にスキルと Claude の近道を置く
+```
+
+`install` は、スキル `explain-page` を `~/.claude/skills`（Claude Code）と `~/.agents/skills`（Codex）へ、
+Claude の近道コマンド（`/page-status`・`/page-check`・`/page-enable`）を `~/.claude/commands` へ置きます。
+既存のファイルを書き換えるときは、元を `.bak-explain-page` に控えます。
+⚠️Codex と Hermes がスキルを名前で呼べるかは、まだ実機で確かめていません。
+
 ## 安全の決まり
 
 - プロジェクトに `.claude/visual-hook-policy.json` が無ければ、フックは何もせず終わります。
