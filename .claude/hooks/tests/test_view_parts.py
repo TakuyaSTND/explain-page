@@ -63,6 +63,12 @@ class EmphasisRoleTests(unittest.TestCase):
         self.assertIn('<b class="em-risk">増える</b>', html)
         self.assertIn('class="ii" tabindex="0" role="note" aria-label="補足：1件だけで測った" data-info="1件だけで測った">i</span>', html)
 
+    def test_dim_markup_is_muted_and_escaped(self):
+        # G1（2026-11-06）：[[dim:…]] は文を薄く出す（色だけ・中身は残す・中の文字はエスケープ）。
+        html = _page({"walkthrough": "趨勢：[[dim:要約だけで<書いた>文]]。"}, "walkthrough")
+        self.assertIn('<span class="em-dim">要約だけで&lt;書いた&gt;文</span>', html)
+        self.assertIn(".em-dim{color:var(--ink-3)}", html)
+
     def test_info_text_is_escaped(self):
         html = _page({"walkthrough": "a：[[info:<b>危ない\"文</b>]]"}, "walkthrough")
         self.assertNotIn("<b>危ない", html)

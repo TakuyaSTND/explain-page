@@ -295,7 +295,7 @@ VIEW_CSS = """
 .card-key{margin:0;padding:.35rem .6rem;border-left:3px solid var(--accent);background:var(--accent-soft);color:var(--ink);font-weight:700;font-size:.97rem;line-height:1.65;max-width:none}
 .card[data-tone="good"] .card-key{border-left-color:var(--pass);background:var(--pass-soft)}.card[data-tone="warn"] .card-key{border-left-color:var(--warn);background:var(--warn-soft)}.card[data-tone="bad"] .card-key{border-left-color:var(--fail);background:var(--fail-soft)}
 .card .card-body{font-size:.9rem}
-.em-num{color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums}.em-risk{color:var(--fail);font-weight:700}
+.em-num{color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums}.em-risk{color:var(--fail);font-weight:700}.em-dim{color:var(--ink-3)}
 .hv{display:inline-flex;align-items:center;gap:.25rem;padding:0 .3rem;border:1px solid var(--accent);border-radius:2px;background:var(--accent-soft);color:var(--accent);font-weight:700;font-size:.88em;line-height:1.5;cursor:zoom-in;outline:none;white-space:nowrap;vertical-align:.05em}
 .hv::after{content:"";display:inline-block;width:.85em;height:.65em;border:1.5px solid currentColor;border-radius:1px;background:linear-gradient(135deg,transparent 55%,currentColor 55%)}
 .hv:hover,.hv.on{background:var(--accent);color:var(--on-accent)}.hv:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
@@ -660,6 +660,10 @@ def _render_inline(
                 elif tone.strip().lower() == "risk":
                     # 案V2：リスク・否定は赤の太字。
                     output.append('<b class="em-risk">%s</b>' % escape(label.strip()))
+                elif tone.strip().lower() == "dim":
+                    # 2026-11-06（G1・利用者の回答＝赤ペン g-impl-01 の Q2 B）：本文で確かめられなかった文などを薄く出す。
+                    #   色を薄くするだけで中身は削らない（印刷でも文は残る）。中は文字のまま＝印や吹き出しは組まない（num・risk と同じ）。
+                    output.append('<span class="em-dim">%s</span>' % escape(label.strip()))
                 elif tone.strip().lower() == "pic":
                     # 2026-10-31：[[pic:鍵]] / [[pic:鍵:表示の語]]＝hover_images に登録した画像を、語にマウスを載せる・
                     #   キーで止まると浮かせて出す（押すと拡大）。登録の無い鍵は語だけ出す（壊れた印を出さない）。
