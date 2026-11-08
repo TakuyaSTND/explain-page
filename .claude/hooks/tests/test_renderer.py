@@ -260,7 +260,7 @@ class ComponentRendererTests(unittest.TestCase):
         self.assertIn('class="gnc"', html)
         self.assertIn("<b>GOAL</b>", html)
         self.assertIn("<b>DECISION</b>", html)
-        self.assertIn("--ground:#F5F3EC", html)
+        self.assertIn("--ground:#F3F6F8", html)
         self.assertIn("max-width:56rem", html)
         self.assertIn("border-radius:2px", html)
         self.assertIn("Zen Old Mincho", html)
@@ -329,8 +329,8 @@ class ComponentRendererTests(unittest.TestCase):
         self.assertIn('<span class="ttl">Risk</span>', html)
         self.assertIn('data-tone="risk"', html)
         self.assertIn('class="flow-step"', html)
-        # 2026-08-29：配色を参照頁のトンマナ（温かい紙色＋紺）に合わせた
-        self.assertIn("--accent:#2F5D8A", html)
+        # 2026-11-09：配色を利用者が示した参考の頁（青灰の地＋青緑の強調）に合わせた（C1〜C9）
+        self.assertIn("--accent:#0E6B8C", html)
         self.assertIn('font-family:"Zen Old Mincho"', html)
 
     def test_long_paths_are_allowed_to_wrap_on_mobile(self):
